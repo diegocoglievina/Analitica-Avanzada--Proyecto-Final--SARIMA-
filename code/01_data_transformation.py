@@ -14,18 +14,15 @@ import math
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from google.colab import drive
 from statsmodels.tsa.stattools import adfuller, kpss
 from statsmodels.tsa.stattools import pacf as sm_pacf
 
 # Configure plotting style
 plt.style.use('seaborn-v0_8-whitegrid')
 
-# Mount Google Drive
-drive.mount('/content/drive')
 
 # Define dataset path
-DAILY_SALES_PATH = "/content/drive/My Drive/Universidad Anáhuac/Posgrado/Analítica avanzada/Proyecto final/Dataset/dataset_daily_sales.csv"
+DAILY_SALES_PATH = "../dataset/dataset_daily_sales.csv"
 
 """## 2. Utility Functions
 Helper functions for normalization, statistical calculations, and transformations.
