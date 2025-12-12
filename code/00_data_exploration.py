@@ -27,7 +27,6 @@ import math
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from google.colab import drive
 from statsmodels.tsa.stattools import adfuller, kpss
 from statsmodels.tsa.stattools import pacf as sm_pacf
 
