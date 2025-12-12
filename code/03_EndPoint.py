@@ -25,7 +25,7 @@ app = Flask(__name__)
 
 
 MLFLOW_TRACKING_URI = "./mlruns"
-EXPERIMENT_NAME = "SARIMA_Refactored_v2"
+EXPERIMENT_NAME = "SARIMA_Refactored_v3"
 VALID_SEGMENTS = ["DEALER", "OEM", "PROFESSIONAL END-USERS"]
 VALID_TARGETS = ["net_sales", "returns"]
 
