@@ -620,15 +620,15 @@ def train_and_log_model(segment, target_col, target_label,
 # In[ ]:
 
 
-SARIMA_P = 0
+SARIMA_P = 1
 SARIMA_D = 1
 SARIMA_Q = 1
 SARIMA_CAP_P = 1
 SARIMA_CAP_D = 1
-SARIMA_CAP_Q = 0
+SARIMA_CAP_Q = 1
 SARIMA_S = 12
 
-ITERATIONS = 1000
+ITERATIONS = 10000
 LEARNING_RATE = 0.01
 
 targets = {
