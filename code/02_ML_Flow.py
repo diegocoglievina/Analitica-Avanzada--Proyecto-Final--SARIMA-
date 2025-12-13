@@ -41,14 +41,18 @@ ARTIFACTS_DIR = "./artifacts"
 
 SARIMA_P = 0
 SARIMA_D = 1
-SARIMA_Q = 0
-SARIMA_CAP_P = 0
+SARIMA_Q = 1
+SARIMA_CAP_P = 1
 SARIMA_CAP_D = 1
-SARIMA_CAP_Q = 0
+SARIMA_CAP_Q = 1
 SARIMA_S = 12
 
-ITERATIONS = 10000
-LEARNING_RATE = 0.01
+train_end_date = pd.Timestamp('2025-01-01')
+test_end_date = pd.Timestamp('2025-10-01')
+
+ITERATIONS = 1000
+LEARNING_RATE = 0.05
+L2_REGULARIZATION = 0.0001
 
 os.makedirs(ARTIFACTS_DIR, exist_ok=True)
 
@@ -128,7 +132,7 @@ def moving_average(errors, q, coefficients):
 # In[ ]:
 
 
-def arma_fit_joint(data, p, q, iterations, learning_rate, l2_reg=0.05):
+def arma_fit_joint(data, p, q, iterations, learning_rate, l2_reg=0.01):
     n = len(data)
     ar_coeffs = np.zeros(p)
     ma_coeffs = np.zeros(q)
@@ -191,7 +195,7 @@ def sarima_fit(data, p, d, q, P, D, Q, s, iterations, learning_rate):
     if len(w) < min_required:
         raise ValueError(f"Not enough data after differencing. Need at least {min_required}, got {len(w)}")
     
-    ar_coeffs, ma_coeffs, residual_tail = arma_fit_joint(w, p, q, iterations, learning_rate)
+    ar_coeffs, ma_coeffs, residual_tail = arma_fit_joint(w, p, q, iterations, learning_rate, L2_REGULARIZATION)
     
     max_lag = max(p, q)
     if max_lag == 0:
@@ -499,8 +503,7 @@ monthly_df.head()
 # In[ ]:
 
 
-train_end_date = pd.Timestamp('2025-08-01')
-test_end_date = pd.Timestamp('2025-10-01')
+
 
 print(f"Training period: Start - {train_end_date}")
 print(f"Test period: {train_end_date} - {test_end_date}")
