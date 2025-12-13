@@ -39,6 +39,17 @@ DATA_PATH = "../dataset/dataset_monthly_cust_l3_sarima.csv"
 EXPERIMENT_NAME = "SARIMA_Refactored_v3"
 ARTIFACTS_DIR = "./artifacts"
 
+SARIMA_P = 0
+SARIMA_D = 1
+SARIMA_Q = 0
+SARIMA_CAP_P = 0
+SARIMA_CAP_D = 1
+SARIMA_CAP_Q = 0
+SARIMA_S = 12
+
+ITERATIONS = 10000
+LEARNING_RATE = 0.01
+
 os.makedirs(ARTIFACTS_DIR, exist_ok=True)
 
 mlflow.end_run()
@@ -117,7 +128,7 @@ def moving_average(errors, q, coefficients):
 # In[ ]:
 
 
-def arma_fit_joint(data, p, q, iterations, learning_rate, l2_reg=0.001):
+def arma_fit_joint(data, p, q, iterations, learning_rate, l2_reg=0.05):
     n = len(data)
     ar_coeffs = np.zeros(p)
     ma_coeffs = np.zeros(q)
@@ -624,16 +635,7 @@ def train_and_log_model(segment, target_col, target_label,
 # In[ ]:
 
 
-SARIMA_P = 1
-SARIMA_D = 1
-SARIMA_Q = 1
-SARIMA_CAP_P = 1
-SARIMA_CAP_D = 1
-SARIMA_CAP_Q = 1
-SARIMA_S = 12
 
-ITERATIONS = 10000
-LEARNING_RATE = 0.01
 
 targets = {
     'net_sales_units': 'net_sales',
