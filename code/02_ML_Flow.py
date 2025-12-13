@@ -48,14 +48,14 @@ SARIMA_CAP_Q = 0
 SARIMA_S = 12
 
 train_end_date = pd.Timestamp('2025-01-01')
-test_end_date = pd.Timestamp('2025-10-01')
+test_end_date  = pd.Timestamp('2025-10-01')
 
 ITERATIONS = 10_000
 LEARNING_RATE = 0.01
 L2_REGULARIZATION = 0.0001
 
 INITIAL_TRAIN_SIZE = 15
-HORIZON = 4
+HORIZON = 12
 
 TARGET_DIFF_CONFIG = {
     'net_sales_units': {'d': 1, 'D': 1},
