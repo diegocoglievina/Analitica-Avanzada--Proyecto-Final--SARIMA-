@@ -160,7 +160,9 @@ class ModelManager:
             model = self.current_models[model_key]["model"]
             input_df = pd.DataFrame({"forecast_periods": [num_periods]})
             predictions = model.predict(input_df)
-            return predictions.tolist(), None
+            predictions_array = np.asarray(predictions, dtype=float)
+            rounded_predictions = np.clip(np.rint(predictions_array), 0, None).astype(int)
+            return rounded_predictions.tolist(), None
         except Exception as e:
             return None, f"Prediction failed: {str(e)}"
 
@@ -883,7 +885,7 @@ DASHBOARD_HTML = """
                 html += '<tr>';
                 html += '<td>' + f.period + '</td>';
                 html += '<td>' + f.month + '</td>';
-                html += '<td class="forecast-value">$' + f.forecast_value.toLocaleString() + '</td>';
+                html += '<td class="forecast-value">' + f.forecast_value.toLocaleString() + '</td>';
                 html += '</tr>';
             });
             
@@ -905,9 +907,9 @@ DASHBOARD_HTML = """
             data.forecasts.forEach(f => {
                 html += '<tr>';
                 html += '<td>' + f.month + '</td>';
-                html += '<td class="forecast-value">' + (f.net_sales_forecast ? '$' + f.net_sales_forecast.toLocaleString() : '-') + '</td>';
-                html += '<td style="color: var(--warning);">' + (f.returns_forecast ? '$' + f.returns_forecast.toLocaleString() : '-') + '</td>';
-                html += '<td style="color: var(--accent); font-weight: 600;">' + (f.total_net_forecast ? '$' + f.total_net_forecast.toLocaleString() : '-') + '</td>';
+                html += '<td class="forecast-value">' + (f.net_sales_forecast ? f.net_sales_forecast.toLocaleString() : '-') + '</td>';
+                html += '<td style="color: var(--warning);">' + (f.returns_forecast ? f.returns_forecast.toLocaleString() : '-') + '</td>';
+                html += '<td style="color: var(--accent); font-weight: 600;">' + (f.total_net_forecast ? f.total_net_forecast.toLocaleString() : '-') + '</td>';
                 html += '</tr>';
             });
             
@@ -1051,12 +1053,13 @@ def predict():
 
     forecast_result = []
     for i, (date, value) in enumerate(zip(forecast_dates, predictions)):
+        units_value = max(int(round(float(value))), 0)
         forecast_result.append(
             {
                 "period": i + 1,
                 "date": date.strftime("%Y-%m-%d"),
                 "month": date.strftime("%Y-%m"),
-                "forecast_value": round(float(value), 2)
+                "forecast_value": units_value
             }
         )
 
@@ -1123,10 +1126,13 @@ def predict_batch():
     for i, date in enumerate(forecast_dates):
         entry = {"period": i + 1, "date": date.strftime("%Y-%m-%d"), "month": date.strftime("%Y-%m")}
         for target, preds in results.items():
-            entry[f"{target}_forecast"] = round(float(preds[i]), 2)
+            units_value = max(int(round(float(preds[i]))), 0)
+            entry[f"{target}_forecast"] = units_value
 
-        if "net_sales" in results and "returns" in results:
-            entry["total_net_forecast"] = round(max(float(results["net_sales"][i]) - float(results["returns"][i]), 0.0), 2)
+        net_sales_units = entry.get("net_sales_forecast")
+        returns_units = entry.get("returns_forecast")
+        if net_sales_units is not None and returns_units is not None:
+            entry["total_net_forecast"] = max(net_sales_units - returns_units, 0)
 
         forecast_result.append(entry)
 

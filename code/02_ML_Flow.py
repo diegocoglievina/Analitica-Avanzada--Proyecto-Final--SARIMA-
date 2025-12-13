@@ -446,10 +446,14 @@ def plot_residuals(residuals, segment, target, save_path):
 def plot_test_vs_forecast(test_dates, test_actual, sarima_forecast_vals, baseline_forecast, 
                           segment, target, save_path):
     fig, ax = plt.subplots(figsize=(12, 6))
+
+    test_actual_units = np.clip(np.rint(np.asarray(test_actual, dtype=float)), 0, None).astype(int)
+    sarima_forecast_units = np.clip(np.rint(np.asarray(sarima_forecast_vals, dtype=float)), 0, None).astype(int)
+    baseline_units = np.clip(np.rint(np.asarray(baseline_forecast, dtype=float)), 0, None).astype(int)
     
-    ax.plot(test_dates, test_actual, 'b-o', linewidth=2, markersize=6, label='Actual')
-    ax.plot(test_dates, sarima_forecast_vals, 'r--s', linewidth=2, markersize=6, label='SARIMA Forecast')
-    ax.plot(test_dates, baseline_forecast, 'g:^', linewidth=2, markersize=6, label='Seasonal Naive')
+    ax.plot(test_dates, test_actual_units, 'b-o', linewidth=2, markersize=6, label='Actual')
+    ax.plot(test_dates, sarima_forecast_units, 'r--s', linewidth=2, markersize=6, label='SARIMA Forecast')
+    ax.plot(test_dates, baseline_units, 'g:^', linewidth=2, markersize=6, label='Seasonal Naive')
     
     ax.set_title(f'Test vs Forecast - {segment} {target}')
     ax.set_xlabel('Date')
@@ -729,7 +733,7 @@ for segment in segments:
         iterations=ITERATIONS, learning_rate=LEARNING_RATE
     )
     model_ns.fit(full_net_sales)
-    forecast_ns = model_ns.predict(None, forecast_horizon)
+    forecast_ns = np.clip(np.rint(model_ns.predict(None, forecast_horizon)), 0, None).astype(int)
     
     model_ret = SARIMAModel(
         ar_order=SARIMA_P, diff_order=SARIMA_D, ma_order=SARIMA_Q,
@@ -738,7 +742,7 @@ for segment in segments:
         iterations=ITERATIONS, learning_rate=LEARNING_RATE
     )
     model_ret.fit(full_returns)
-    forecast_ret = model_ret.predict(None, forecast_horizon)
+    forecast_ret = np.clip(np.rint(model_ret.predict(None, forecast_horizon)), 0, None).astype(int)
     
     forecast_total = np.maximum(forecast_ns - forecast_ret, 0)
     
@@ -810,9 +814,9 @@ for segment in segments:
         all_forecasts.append({
             'segment': segment,
             'forecast_date': date,
-            'net_sales_forecast': data['net_sales'][i],
-            'returns_forecast': data['returns'][i],
-            'total_net_forecast': data['total_net'][i]
+            'net_sales_forecast': int(data['net_sales'][i]),
+            'returns_forecast': int(data['returns'][i]),
+            'total_net_forecast': int(data['total_net'][i])
         })
 
 forecasts_df = pd.DataFrame(all_forecasts)
@@ -839,4 +843,3 @@ print("  - Baseline comparisons logged")
 print("  - Full model state persisted")
 print(f"\nMLflow Experiment: {EXPERIMENT_NAME}")
 print("\nTo view MLflow UI: mlflow ui --port 5000")
-
