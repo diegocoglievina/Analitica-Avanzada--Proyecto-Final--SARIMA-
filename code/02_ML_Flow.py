@@ -39,20 +39,23 @@ DATA_PATH = "../dataset/dataset_monthly_cust_l3_sarima.csv"
 EXPERIMENT_NAME = "SARIMA_Refactored_v3"
 ARTIFACTS_DIR = "./artifacts"
 
-SARIMA_P = 0
+SARIMA_P = 1
 SARIMA_D = 1
 SARIMA_Q = 1
-SARIMA_CAP_P = 1
+SARIMA_CAP_P = 0
 SARIMA_CAP_D = 1
-SARIMA_CAP_Q = 1
+SARIMA_CAP_Q = 0
 SARIMA_S = 12
 
 train_end_date = pd.Timestamp('2025-01-01')
 test_end_date = pd.Timestamp('2025-10-01')
 
-ITERATIONS = 1000
-LEARNING_RATE = 0.05
-L2_REGULARIZATION = 0.0001
+ITERATIONS = 10_000
+LEARNING_RATE = 0.01
+L2_REGULARIZATION = 0.001
+
+INITIAL_TRAIN_SIZE = 15
+HORIZON = 12
 
 os.makedirs(ARTIFACTS_DIR, exist_ok=True)
 
@@ -106,78 +109,180 @@ def inverse_double_difference(w_forecast, log_history, seasonal_period=12):
     return np.array(z_extended[len(log_history):])
 
 
-# ## 3. ARMA Functions
+# ## 3. Full SARIMA Functions
 # 
-# Autoregression and Moving Average with joint training.
+# Multiplicative SARIMA with non-seasonal and seasonal AR/MA terms.
+# SARIMA(p,d,q)(P,D,Q)[s] on doubly differenced series w_t:
+# (1 - φ₁B - ... - φₚBᵖ)(1 - Φ₁Bˢ - ... - ΦₚBᴾˢ)w_t = 
+# (1 + θ₁B + ... + θqBᵍ)(1 + Θ₁Bˢ + ... + ΘQBᴽˢ)ε_t
 
 # In[ ]:
 
 
-def autoregression(data, p, coefficients):
-    total = 0.0
-    for i in range(p):
-        if i < len(data) and i < len(coefficients):
-            total += coefficients[i] * data[-(i + 1)]
-    return total
+def build_sarima_lag_structure(p, q, cap_p, cap_q, s):
+    ar_lags = list(range(1, p + 1))
+    seasonal_ar_lags = [s * i for i in range(1, cap_p + 1)]
+    interaction_ar_lags = []
+    for non_seas_lag in ar_lags:
+        for seas_lag in seasonal_ar_lags:
+            interaction_ar_lags.append(non_seas_lag + seas_lag)
+    
+    ma_lags = list(range(1, q + 1))
+    seasonal_ma_lags = [s * i for i in range(1, cap_q + 1)]
+    interaction_ma_lags = []
+    for non_seas_lag in ma_lags:
+        for seas_lag in seasonal_ma_lags:
+            interaction_ma_lags.append(non_seas_lag + seas_lag)
+    
+    all_ar_lags = sorted(set(ar_lags + seasonal_ar_lags + interaction_ar_lags))
+    all_ma_lags = sorted(set(ma_lags + seasonal_ma_lags + interaction_ma_lags))
+    
+    return {
+        'ar_lags': ar_lags,
+        'seasonal_ar_lags': seasonal_ar_lags,
+        'interaction_ar_lags': interaction_ar_lags,
+        'ma_lags': ma_lags,
+        'seasonal_ma_lags': seasonal_ma_lags,
+        'interaction_ma_lags': interaction_ma_lags,
+        'all_ar_lags': all_ar_lags,
+        'all_ma_lags': all_ma_lags,
+        'max_ar_lag': max(all_ar_lags) if all_ar_lags else 0,
+        'max_ma_lag': max(all_ma_lags) if all_ma_lags else 0
+    }
 
 
-def moving_average(errors, q, coefficients):
-    total = 0.0
-    for i in range(q):
-        if i < len(errors) and i < len(coefficients):
-            total += coefficients[i] * errors[-(i + 1)]
-    return total
+def sarima_predict_step(data_history, errors_history, lag_structure, 
+                        ar_coeffs, seasonal_ar_coeffs, interaction_ar_coeffs,
+                        ma_coeffs, seasonal_ma_coeffs, interaction_ma_coeffs):
+    prediction = 0.0
+    
+    for i, lag in enumerate(lag_structure['ar_lags']):
+        if lag <= len(data_history) and i < len(ar_coeffs):
+            prediction += ar_coeffs[i] * data_history[-lag]
+    
+    for i, lag in enumerate(lag_structure['seasonal_ar_lags']):
+        if lag <= len(data_history) and i < len(seasonal_ar_coeffs):
+            prediction += seasonal_ar_coeffs[i] * data_history[-lag]
+    
+    for i, lag in enumerate(lag_structure['interaction_ar_lags']):
+        if lag <= len(data_history) and i < len(interaction_ar_coeffs):
+            prediction += interaction_ar_coeffs[i] * data_history[-lag]
+    
+    for i, lag in enumerate(lag_structure['ma_lags']):
+        if lag <= len(errors_history) and i < len(ma_coeffs):
+            prediction += ma_coeffs[i] * errors_history[-lag]
+    
+    for i, lag in enumerate(lag_structure['seasonal_ma_lags']):
+        if lag <= len(errors_history) and i < len(seasonal_ma_coeffs):
+            prediction += seasonal_ma_coeffs[i] * errors_history[-lag]
+    
+    for i, lag in enumerate(lag_structure['interaction_ma_lags']):
+        if lag <= len(errors_history) and i < len(interaction_ma_coeffs):
+            prediction += interaction_ma_coeffs[i] * errors_history[-lag]
+    
+    return prediction
 
 
 # In[ ]:
 
 
-def arma_fit_joint(data, p, q, iterations, learning_rate, l2_reg=0.01):
+def sarima_fit_full(data, p, q, cap_p, cap_q, s, iterations, learning_rate, l2_reg=0.01):
     n = len(data)
+    lag_structure = build_sarima_lag_structure(p, q, cap_p, cap_q, s)
+    
     ar_coeffs = np.zeros(p)
+    seasonal_ar_coeffs = np.zeros(cap_p)
+    interaction_ar_coeffs = np.zeros(len(lag_structure['interaction_ar_lags']))
+    
     ma_coeffs = np.zeros(q)
+    seasonal_ma_coeffs = np.zeros(cap_q)
+    interaction_ma_coeffs = np.zeros(len(lag_structure['interaction_ma_lags']))
     
-    max_lag = max(p, q)
-    if max_lag == 0:
-        max_lag = 1
+    max_lag = max(lag_structure['max_ar_lag'], lag_structure['max_ma_lag'], 1)
+    start_t = max_lag
     
-    errors_history = [0.0] * max_lag
+    if start_t >= n:
+        return {
+            'ar_coeffs': ar_coeffs.tolist(),
+            'seasonal_ar_coeffs': seasonal_ar_coeffs.tolist(),
+            'interaction_ar_coeffs': interaction_ar_coeffs.tolist(),
+            'ma_coeffs': ma_coeffs.tolist(),
+            'seasonal_ma_coeffs': seasonal_ma_coeffs.tolist(),
+            'interaction_ma_coeffs': interaction_ma_coeffs.tolist(),
+            'lag_structure': lag_structure,
+            'residual_tail': [0.0] * max(lag_structure['max_ma_lag'], 1)
+        }
+    
+    errors_padded = [0.0] * max_lag
     
     for iteration in range(iterations):
-        current_errors = list(errors_history)
+        errors_list = list(errors_padded)
         
-        for t in range(max_lag, n):
-            ar_pred = 0.0
-            for i in range(p):
-                ar_pred += ar_coeffs[i] * data[t - i - 1]
+        for t in range(start_t, n):
+            data_slice = list(data[:t])
             
-            ma_pred = 0.0
-            for i in range(q):
-                if len(current_errors) > i:
-                    ma_pred += ma_coeffs[i] * current_errors[-(i + 1)]
+            pred = sarima_predict_step(
+                data_slice, errors_list, lag_structure,
+                ar_coeffs, seasonal_ar_coeffs, interaction_ar_coeffs,
+                ma_coeffs, seasonal_ma_coeffs, interaction_ma_coeffs
+            )
             
-            predict = ar_pred + ma_pred
-            error = data[t] - predict
+            error = data[t] - pred
             
-            for i in range(p):
-                grad = learning_rate * (error * data[t - i - 1] - l2_reg * ar_coeffs[i])
-                ar_coeffs[i] += grad
+            for i, lag in enumerate(lag_structure['ar_lags']):
+                if lag <= len(data_slice) and i < len(ar_coeffs):
+                    grad = learning_rate * (error * data_slice[-lag] - l2_reg * ar_coeffs[i])
+                    ar_coeffs[i] += grad
             
-            for i in range(q):
-                if len(current_errors) > i:
-                    grad = learning_rate * (error * current_errors[-(i + 1)] - l2_reg * ma_coeffs[i])
+            for i, lag in enumerate(lag_structure['seasonal_ar_lags']):
+                if lag <= len(data_slice) and i < len(seasonal_ar_coeffs):
+                    grad = learning_rate * (error * data_slice[-lag] - l2_reg * seasonal_ar_coeffs[i])
+                    seasonal_ar_coeffs[i] += grad
+            
+            for i, lag in enumerate(lag_structure['interaction_ar_lags']):
+                if lag <= len(data_slice) and i < len(interaction_ar_coeffs):
+                    grad = learning_rate * (error * data_slice[-lag] - l2_reg * interaction_ar_coeffs[i])
+                    interaction_ar_coeffs[i] += grad
+            
+            for i, lag in enumerate(lag_structure['ma_lags']):
+                if lag <= len(errors_list) and i < len(ma_coeffs):
+                    grad = learning_rate * (error * errors_list[-lag] - l2_reg * ma_coeffs[i])
                     ma_coeffs[i] += grad
             
-            current_errors.append(error)
-            if len(current_errors) > max_lag:
-                current_errors.pop(0)
+            for i, lag in enumerate(lag_structure['seasonal_ma_lags']):
+                if lag <= len(errors_list) and i < len(seasonal_ma_coeffs):
+                    grad = learning_rate * (error * errors_list[-lag] - l2_reg * seasonal_ma_coeffs[i])
+                    seasonal_ma_coeffs[i] += grad
+            
+            for i, lag in enumerate(lag_structure['interaction_ma_lags']):
+                if lag <= len(errors_list) and i < len(interaction_ma_coeffs):
+                    grad = learning_rate * (error * errors_list[-lag] - l2_reg * interaction_ma_coeffs[i])
+                    interaction_ma_coeffs[i] += grad
+            
+            errors_list.append(error)
         
         ar_coeffs = np.clip(ar_coeffs, -0.95, 0.95)
+        seasonal_ar_coeffs = np.clip(seasonal_ar_coeffs, -0.95, 0.95)
+        interaction_ar_coeffs = np.clip(interaction_ar_coeffs, -0.95, 0.95)
         ma_coeffs = np.clip(ma_coeffs, -0.95, 0.95)
+        seasonal_ma_coeffs = np.clip(seasonal_ma_coeffs, -0.95, 0.95)
+        interaction_ma_coeffs = np.clip(interaction_ma_coeffs, -0.95, 0.95)
         
-        errors_history = current_errors[-max_lag:]
+        errors_padded = errors_list[-max_lag:] if max_lag > 0 else [0.0]
     
-    return ar_coeffs.tolist(), ma_coeffs.tolist(), errors_history[-q:] if q > 0 else []
+    residual_tail_len = max(lag_structure['max_ma_lag'], 1)
+    residual_tail = errors_list[-residual_tail_len:] if len(errors_list) >= residual_tail_len else errors_list
+    
+    return {
+        'ar_coeffs': ar_coeffs.tolist(),
+        'seasonal_ar_coeffs': seasonal_ar_coeffs.tolist(),
+        'interaction_ar_coeffs': interaction_ar_coeffs.tolist(),
+        'ma_coeffs': ma_coeffs.tolist(),
+        'seasonal_ma_coeffs': seasonal_ma_coeffs.tolist(),
+        'interaction_ma_coeffs': interaction_ma_coeffs.tolist(),
+        'lag_structure': lag_structure,
+        'residual_tail': residual_tail
+    }
 
 
 # ## 4. SARIMA Fit and Forecast Functions
@@ -191,37 +296,44 @@ def sarima_fit(data, p, d, q, P, D, Q, s, iterations, learning_rate):
     
     w, seasonal_diff = double_difference(log_data, s)
     
-    min_required = max(p, q) + 1
+    lag_structure = build_sarima_lag_structure(p, q, P, Q, s)
+    max_lag = max(lag_structure['max_ar_lag'], lag_structure['max_ma_lag'], 1)
+    min_required = max_lag + 1
+    
     if len(w) < min_required:
         raise ValueError(f"Not enough data after differencing. Need at least {min_required}, got {len(w)}")
     
-    ar_coeffs, ma_coeffs, residual_tail = arma_fit_joint(w, p, q, iterations, learning_rate, L2_REGULARIZATION)
+    fit_result = sarima_fit_full(w, p, q, P, Q, s, iterations, learning_rate, L2_REGULARIZATION)
     
-    max_lag = max(p, q)
-    if max_lag == 0:
-        max_lag = 1
-    
+    start_t = max_lag
     in_sample_predictions = []
-    current_errors = [0.0] * max_lag
+    errors_list = [0.0] * max_lag
     
-    for t in range(max_lag, len(w)):
-        ar_pred = autoregression(list(w[:t]), p, ar_coeffs)
-        ma_pred = moving_average(current_errors, q, ma_coeffs)
-        predict = ar_pred + ma_pred
-        in_sample_predictions.append(predict)
-        
-        error = w[t] - predict
-        current_errors.append(error)
-        if len(current_errors) > max_lag:
-            current_errors.pop(0)
+    for t in range(start_t, len(w)):
+        data_slice = list(w[:t])
+        pred = sarima_predict_step(
+            data_slice, errors_list, fit_result['lag_structure'],
+            fit_result['ar_coeffs'], fit_result['seasonal_ar_coeffs'], fit_result['interaction_ar_coeffs'],
+            fit_result['ma_coeffs'], fit_result['seasonal_ma_coeffs'], fit_result['interaction_ma_coeffs']
+        )
+        in_sample_predictions.append(pred)
+        error = w[t] - pred
+        errors_list.append(error)
+    
+    diff_tail_len = max(max_lag, s + 1)
     
     return {
         'shift_constant': shift_constant,
-        'ar_coeffs': ar_coeffs,
-        'ma_coeffs': ma_coeffs,
+        'ar_coeffs': fit_result['ar_coeffs'],
+        'seasonal_ar_coeffs': fit_result['seasonal_ar_coeffs'],
+        'interaction_ar_coeffs': fit_result['interaction_ar_coeffs'],
+        'ma_coeffs': fit_result['ma_coeffs'],
+        'seasonal_ma_coeffs': fit_result['seasonal_ma_coeffs'],
+        'interaction_ma_coeffs': fit_result['interaction_ma_coeffs'],
+        'lag_structure': fit_result['lag_structure'],
         'log_history': list(log_data[-(s + 1):]),
-        'diff_tail': list(w[-max(p, 1):]),
-        'residual_tail': residual_tail if q > 0 else [0.0],
+        'diff_tail': list(w[-diff_tail_len:]),
+        'residual_tail': fit_result['residual_tail'],
         'in_sample_predictions': np.array(in_sample_predictions),
         'w': w,
         'log_data': log_data,
@@ -233,28 +345,36 @@ def sarima_fit(data, p, d, q, P, D, Q, s, iterations, learning_rate):
 
 
 def sarima_forecast(model_state, num_steps):
-    p = model_state['p']
-    q = model_state['q']
     s = model_state['s']
-    ar_coeffs = model_state['ar_coeffs']
-    ma_coeffs = model_state['ma_coeffs']
     log_history = model_state['log_history']
     diff_tail = list(model_state['diff_tail'])
     residual_tail = list(model_state['residual_tail'])
     shift_constant = model_state['shift_constant']
+    lag_structure = model_state['lag_structure']
+    
+    ar_coeffs = model_state['ar_coeffs']
+    seasonal_ar_coeffs = model_state['seasonal_ar_coeffs']
+    interaction_ar_coeffs = model_state['interaction_ar_coeffs']
+    ma_coeffs = model_state['ma_coeffs']
+    seasonal_ma_coeffs = model_state['seasonal_ma_coeffs']
+    interaction_ma_coeffs = model_state['interaction_ma_coeffs']
+    
+    max_ma_lag = lag_structure['max_ma_lag'] if lag_structure['max_ma_lag'] > 0 else 1
     
     w_forecast = []
     
     for step in range(num_steps):
-        ar_pred = autoregression(diff_tail, p, ar_coeffs)
-        ma_pred = moving_average(residual_tail, q, ma_coeffs)
-        w_pred = ar_pred + ma_pred
+        w_pred = sarima_predict_step(
+            diff_tail, residual_tail, lag_structure,
+            ar_coeffs, seasonal_ar_coeffs, interaction_ar_coeffs,
+            ma_coeffs, seasonal_ma_coeffs, interaction_ma_coeffs
+        )
         
         w_forecast.append(w_pred)
         diff_tail.append(w_pred)
         
         residual_tail.append(0.0)
-        if len(residual_tail) > max(q, 1):
+        if len(residual_tail) > max_ma_lag:
             residual_tail.pop(0)
     
     z_forecast = inverse_double_difference(w_forecast, log_history, s)
@@ -304,7 +424,12 @@ class SARIMAModel(mlflow.pyfunc.PythonModel):
         
         self.shift_constant = None
         self.ar_coeffs = None
+        self.seasonal_ar_coeffs = None
+        self.interaction_ar_coeffs = None
         self.ma_coeffs = None
+        self.seasonal_ma_coeffs = None
+        self.interaction_ma_coeffs = None
+        self.lag_structure = None
         self.log_history = None
         self.diff_tail = None
         self.residual_tail = None
@@ -322,7 +447,12 @@ class SARIMAModel(mlflow.pyfunc.PythonModel):
         
         self.shift_constant = result['shift_constant']
         self.ar_coeffs = result['ar_coeffs']
+        self.seasonal_ar_coeffs = result['seasonal_ar_coeffs']
+        self.interaction_ar_coeffs = result['interaction_ar_coeffs']
         self.ma_coeffs = result['ma_coeffs']
+        self.seasonal_ma_coeffs = result['seasonal_ma_coeffs']
+        self.interaction_ma_coeffs = result['interaction_ma_coeffs']
+        self.lag_structure = result['lag_structure']
         self.log_history = result['log_history']
         self.diff_tail = result['diff_tail']
         self.residual_tail = result['residual_tail']
@@ -343,7 +473,12 @@ class SARIMAModel(mlflow.pyfunc.PythonModel):
             'q': self.ma_order,
             's': self.seasonal_period,
             'ar_coeffs': self.ar_coeffs,
+            'seasonal_ar_coeffs': self.seasonal_ar_coeffs,
+            'interaction_ar_coeffs': self.interaction_ar_coeffs,
             'ma_coeffs': self.ma_coeffs,
+            'seasonal_ma_coeffs': self.seasonal_ma_coeffs,
+            'interaction_ma_coeffs': self.interaction_ma_coeffs,
+            'lag_structure': self.lag_structure,
             'log_history': self.log_history,
             'diff_tail': self.diff_tail,
             'residual_tail': self.residual_tail,
@@ -356,9 +491,12 @@ class SARIMAModel(mlflow.pyfunc.PythonModel):
         if self.w is None or self.in_sample_predictions is None:
             return None
         
-        max_lag = max(self.ar_order, self.ma_order)
-        if max_lag == 0:
-            max_lag = 1
+        if self.lag_structure is not None:
+            max_lag = max(self.lag_structure['max_ar_lag'], self.lag_structure['max_ma_lag'], 1)
+        else:
+            max_lag = max(self.ar_order, self.ma_order)
+            if max_lag == 0:
+                max_lag = 1
         
         actual = self.w[max_lag:]
         predicted = self.in_sample_predictions
@@ -373,7 +511,13 @@ class SARIMAModel(mlflow.pyfunc.PythonModel):
             's': self.seasonal_period,
             'iterations': self.iterations, 'learning_rate': self.learning_rate,
             'shift_constant': self.shift_constant,
-            'ar_coeffs': self.ar_coeffs, 'ma_coeffs': self.ma_coeffs,
+            'ar_coeffs': self.ar_coeffs, 
+            'seasonal_ar_coeffs': self.seasonal_ar_coeffs,
+            'interaction_ar_coeffs': self.interaction_ar_coeffs,
+            'ma_coeffs': self.ma_coeffs,
+            'seasonal_ma_coeffs': self.seasonal_ma_coeffs,
+            'interaction_ma_coeffs': self.interaction_ma_coeffs,
+            'lag_structure': self.lag_structure,
             'log_history': self.log_history, 'diff_tail': self.diff_tail, 'residual_tail': self.residual_tail
         }
 
@@ -483,7 +627,220 @@ def plot_test_vs_forecast(test_dates, test_actual, sarima_forecast_vals, baselin
     return save_path
 
 
-# ## 8. Load and Prepare Data
+# ## 8. Residual Diagnostics and Model Selection
+
+# In[ ]:
+
+
+def check_residual_diagnostics(residuals, max_lag=None, lag_structure=None, significance_level=0.05):
+    if max_lag is None:
+        if lag_structure is not None:
+            max_lag = max(24, lag_structure.get('max_ar_lag', 12) + 1, lag_structure.get('max_ma_lag', 12) + 1)
+        else:
+            max_lag = 24
+    
+    if residuals is None or len(residuals) < max_lag + 1:
+        return False, "Insufficient residuals"
+    
+    n = len(residuals)
+    acf = compute_acf(residuals, max_lag)
+    ci = 1.96 / np.sqrt(n)
+    
+    violations = 0
+    violation_lags = []
+    for lag in range(1, max_lag + 1):
+        if abs(acf[lag]) > ci:
+            violations += 1
+            violation_lags.append(lag)
+    
+    max_allowed_violations = max(2, int(max_lag * significance_level * 2))
+    passes = violations <= max_allowed_violations
+    
+    return passes, f"ACF violations at lags {violation_lags}: {violations}/{max_lag} (threshold: {max_allowed_violations})"
+
+
+def rolling_origin_evaluation(data, p, d, q, P, D, Q, s, 
+                               initial_train_size=None, horizon=None,
+                               iterations=1000, learning_rate=0.01):
+    if initial_train_size is None:
+        initial_train_size = INITIAL_TRAIN_SIZE
+    if horizon is None:
+        horizon = HORIZON
+    
+    n = len(data)
+    min_required_size = initial_train_size + horizon + s + 2
+    
+    if n < min_required_size:
+        return {
+            'avg_rmse': np.inf,
+            'avg_mape': np.inf,
+            'fold_count': 0,
+            'successful_folds': 0,
+            'stable': False
+        }
+    
+    fold_rmses = []
+    fold_mapes = []
+    total_folds = 0
+    failed_folds = 0
+    
+    current_train_end = initial_train_size
+    
+    while current_train_end + horizon <= n:
+        train_data = data[:current_train_end]
+        test_data = data[current_train_end:current_train_end + horizon]
+        total_folds += 1
+        
+        try:
+            model = SARIMAModel(
+                ar_order=p, diff_order=d, ma_order=q,
+                seasonal_ar_order=P, seasonal_diff_order=D, seasonal_ma_order=Q,
+                seasonal_period=s,
+                iterations=iterations, learning_rate=learning_rate
+            )
+            model.fit(train_data)
+            predictions = model.predict(None, len(test_data))
+            
+            metrics = calculate_metrics(test_data, predictions)
+            
+            if not np.isnan(metrics['RMSE']) and not np.isinf(metrics['RMSE']):
+                fold_rmses.append(metrics['RMSE'])
+            else:
+                fold_rmses.append(np.inf)
+                failed_folds += 1
+            if not np.isnan(metrics['MAPE']) and not np.isinf(metrics['MAPE']):
+                fold_mapes.append(metrics['MAPE'])
+                
+        except Exception:
+            fold_rmses.append(np.inf)
+            failed_folds += 1
+        
+        current_train_end += 1
+    
+    successful_folds = len([r for r in fold_rmses if r < np.inf])
+    min_successful_required = max(1, total_folds // 2)
+    
+    if successful_folds < min_successful_required:
+        return {
+            'avg_rmse': np.inf,
+            'avg_mape': np.inf,
+            'fold_count': total_folds,
+            'successful_folds': successful_folds,
+            'stable': False
+        }
+    
+    valid_rmses = [r for r in fold_rmses if r < np.inf]
+    avg_rmse = np.mean(valid_rmses)
+    avg_mape = np.mean(fold_mapes) if fold_mapes else np.inf
+    std_rmse = np.std(valid_rmses)
+    
+    stability_threshold = 2.0
+    stable = std_rmse < stability_threshold * avg_rmse
+    
+    return {
+        'avg_rmse': avg_rmse,
+        'avg_mape': avg_mape,
+        'std_rmse': std_rmse,
+        'fold_count': total_folds,
+        'successful_folds': successful_folds,
+        'stable': stable,
+        'fold_rmses': fold_rmses
+    }
+
+
+# In[ ]:
+
+
+def grid_search_sarima(data, s=12, d=1, D=1,
+                       p_range=(0, 1), q_range=(0, 1, 2),
+                       P_range=(0, 1), Q_range=(0, 1),
+                       initial_train_size=None, horizon=None,
+                       iterations=1000, learning_rate=0.01):
+    if initial_train_size is None:
+        initial_train_size = INITIAL_TRAIN_SIZE
+    if horizon is None:
+        horizon = HORIZON
+    candidates = []
+    
+    for p in p_range:
+        for q in q_range:
+            for P in P_range:
+                for Q in Q_range:
+                    candidates.append((p, d, q, P, D, Q, s))
+    
+    results = []
+    
+    for p, d, q, P, D, Q, s in candidates:
+        order_str = f"({p},{d},{q})({P},{D},{Q})[{s}]"
+        
+        try:
+            eval_result = rolling_origin_evaluation(
+                data, p, d, q, P, D, Q, s,
+                initial_train_size=initial_train_size,
+                horizon=horizon,
+                iterations=iterations,
+                learning_rate=learning_rate
+            )
+            
+            if eval_result['fold_count'] == 0:
+                continue
+            
+            try:
+                full_model = SARIMAModel(
+                    ar_order=p, diff_order=d, ma_order=q,
+                    seasonal_ar_order=P, seasonal_diff_order=D, seasonal_ma_order=Q,
+                    seasonal_period=s,
+                    iterations=iterations, learning_rate=learning_rate
+                )
+                full_model.fit(data)
+                residuals = full_model.get_residuals()
+                passes_diag, diag_msg = check_residual_diagnostics(residuals)
+            except Exception:
+                passes_diag = False
+                diag_msg = "Fitting failed"
+            
+            complexity = p + q + P + Q
+            
+            results.append({
+                'order': order_str,
+                'p': p, 'd': d, 'q': q, 'P': P, 'D': D, 'Q': Q, 's': s,
+                'avg_rmse': eval_result['avg_rmse'],
+                'avg_mape': eval_result['avg_mape'],
+                'fold_count': eval_result['fold_count'],
+                'stable': eval_result['stable'],
+                'passes_diagnostics': passes_diag,
+                'diag_message': diag_msg,
+                'complexity': complexity
+            })
+            
+        except Exception as e:
+            continue
+    
+    if not results:
+        return None, []
+    
+    passing_results = [r for r in results if r['passes_diagnostics']]
+    
+    if passing_results:
+        search_pool = passing_results
+    else:
+        search_pool = results
+    
+    search_pool.sort(key=lambda x: (x['avg_rmse'], x['complexity']))
+    
+    best = search_pool[0]
+    
+    if len(search_pool) > 1:
+        best_rmse = best['avg_rmse']
+        tolerance = 0.05
+        similar = [r for r in search_pool if r['avg_rmse'] <= best_rmse * (1 + tolerance)]
+        similar.sort(key=lambda x: x['complexity'])
+        best = similar[0]
+    
+    return best, results
+
+
+# ## 9. Load and Prepare Data
 
 # In[ ]:
 
@@ -498,7 +855,7 @@ print(f"Date range: {monthly_df['date'].min()} to {monthly_df['date'].max()}")
 monthly_df.head()
 
 
-# ## 9. Train/Test Split Configuration
+# ## 10. Train/Test Split Configuration
 
 # In[ ]:
 
@@ -524,7 +881,7 @@ def split_data(df, segment, target_col, train_end, test_end):
     return train_data, test_data, train_dates, test_dates
 
 
-# ## 10. Training Function with MLflow Logging
+# ## 11. Training Function with MLflow Logging
 
 # In[ ]:
 
@@ -633,7 +990,7 @@ def train_and_log_model(segment, target_col, target_label,
     }
 
 
-# ## 11. Model Configuration and Training
+# ## 12. Model Configuration and Training with Grid Search
 
 # In[ ]:
 
@@ -645,7 +1002,10 @@ targets = {
     'returns_units': 'returns'
 }
 
-print(f"SARIMA Order: ({SARIMA_P},{SARIMA_D},{SARIMA_Q})({SARIMA_CAP_P},{SARIMA_CAP_D},{SARIMA_CAP_Q})[{SARIMA_S}]")
+print(f"Grid Search Configuration:")
+print(f"  Fixed: d={SARIMA_D}, D={SARIMA_CAP_D}, s={SARIMA_S}")
+print(f"  Search: p in {{0,1}}, q in {{0,1,2}}, P in {{0,1}}, Q in {{0,1}}")
+print(f"  Using rolling-origin evaluation with initial window={INITIAL_TRAIN_SIZE}, horizon={HORIZON}")
 print(f"Iterations: {ITERATIONS}, Learning Rate: {LEARNING_RATE}")
 
 
@@ -654,6 +1014,7 @@ print(f"Iterations: {ITERATIONS}, Learning Rate: {LEARNING_RATE}")
 
 all_results = {}
 all_metrics = []
+best_orders = {}
 
 for segment in segments:
     print(f"\n{'='*60}")
@@ -661,14 +1022,49 @@ for segment in segments:
     print('='*60)
     
     all_results[segment] = {}
+    best_orders[segment] = {}
     
     for target_col, target_label in targets.items():
         print(f"\n  Target: {target_label}")
+        print(f"    Running grid search on training data only...")
+        
+        train_data, test_data, train_dates, test_dates = split_data(
+            monthly_df, segment, target_col, train_end_date, test_end_date
+        )
+        
+        best_order, search_results = grid_search_sarima(
+            train_data,
+            s=SARIMA_S, d=SARIMA_D, D=SARIMA_CAP_D,
+            p_range=(0, 1), q_range=(0, 1, 2),
+            P_range=(0, 1), Q_range=(0, 1),
+            iterations=ITERATIONS, learning_rate=LEARNING_RATE
+        )
+        
+        if best_order is None:
+            n_after_diff = len(train_data) - SARIMA_S - 1
+            safe_p = min(SARIMA_P, 1)
+            safe_q = min(SARIMA_Q, 2)
+            
+            if n_after_diff < SARIMA_S + 2:
+                safe_P, safe_Q = 0, 0
+            else:
+                safe_P = SARIMA_CAP_P if n_after_diff >= SARIMA_S + SARIMA_CAP_P + 1 else 0
+                safe_Q = SARIMA_CAP_Q if n_after_diff >= SARIMA_S + SARIMA_CAP_Q + 1 else 0
+            
+            p, d, q = safe_p, SARIMA_D, safe_q
+            P, D, Q = safe_P, SARIMA_CAP_D, safe_Q
+            print(f"    Grid search failed, using safe fallback: ({p},{d},{q})({P},{D},{Q})[{SARIMA_S}]")
+        else:
+            p, d, q = best_order['p'], best_order['d'], best_order['q']
+            P, D, Q = best_order['P'], best_order['D'], best_order['Q']
+            print(f"    Best order: {best_order['order']} (CV RMSE: {best_order['avg_rmse']:.2f})")
+            print(f"    Passes diagnostics: {best_order['passes_diagnostics']}")
+        
+        best_orders[segment][target_label] = {'p': p, 'd': d, 'q': q, 'P': P, 'D': D, 'Q': Q}
         
         result = train_and_log_model(
             segment, target_col, target_label,
-            SARIMA_P, SARIMA_D, SARIMA_Q, 
-            SARIMA_CAP_P, SARIMA_CAP_D, SARIMA_CAP_Q, SARIMA_S,
+            p, d, q, P, D, Q, SARIMA_S,
             ITERATIONS, LEARNING_RATE
         )
         
@@ -680,7 +1076,7 @@ for segment in segments:
         all_metrics.append({
             'Segment': segment,
             'Target': target_label,
-            'Order': f"({SARIMA_P},{SARIMA_D},{SARIMA_Q})({SARIMA_CAP_P},{SARIMA_CAP_D},{SARIMA_CAP_Q})[{SARIMA_S}]",
+            'Order': f"({p},{d},{q})({P},{D},{Q})[{SARIMA_S}]",
             'SARIMA_RMSE': sarima_m['RMSE'],
             'SARIMA_MAPE': sarima_m['MAPE'],
             'SARIMA_R2': sarima_m['R2'],
@@ -698,7 +1094,7 @@ print("Training complete!")
 print("="*60)
 
 
-# ## 12. Accuracy Metrics Summary
+# ## 13. Accuracy Metrics Summary
 
 # In[ ]:
 
@@ -712,7 +1108,7 @@ print(metrics_df.to_string())
 metrics_df.to_csv(os.path.join(ARTIFACTS_DIR, 'accuracy_metrics.csv'), index=False)
 
 
-# ## 13. Generate Future Forecasts
+# ## 14. Generate Future Forecasts
 
 # In[ ]:
 
@@ -731,9 +1127,14 @@ for segment in segments:
     full_net_sales = segment_df['net_sales_units'].values
     full_returns = segment_df['returns_units'].values
     
+    ns_order = best_orders.get(segment, {}).get('net_sales', 
+        {'p': SARIMA_P, 'd': SARIMA_D, 'q': SARIMA_Q, 'P': SARIMA_CAP_P, 'D': SARIMA_CAP_D, 'Q': SARIMA_CAP_Q})
+    ret_order = best_orders.get(segment, {}).get('returns',
+        {'p': SARIMA_P, 'd': SARIMA_D, 'q': SARIMA_Q, 'P': SARIMA_CAP_P, 'D': SARIMA_CAP_D, 'Q': SARIMA_CAP_Q})
+    
     model_ns = SARIMAModel(
-        ar_order=SARIMA_P, diff_order=SARIMA_D, ma_order=SARIMA_Q,
-        seasonal_ar_order=SARIMA_CAP_P, seasonal_diff_order=SARIMA_CAP_D, seasonal_ma_order=SARIMA_CAP_Q,
+        ar_order=ns_order['p'], diff_order=ns_order['d'], ma_order=ns_order['q'],
+        seasonal_ar_order=ns_order['P'], seasonal_diff_order=ns_order['D'], seasonal_ma_order=ns_order['Q'],
         seasonal_period=SARIMA_S,
         iterations=ITERATIONS, learning_rate=LEARNING_RATE
     )
@@ -741,8 +1142,8 @@ for segment in segments:
     forecast_ns = np.clip(np.rint(model_ns.predict(None, forecast_horizon)), 0, None).astype(int)
     
     model_ret = SARIMAModel(
-        ar_order=SARIMA_P, diff_order=SARIMA_D, ma_order=SARIMA_Q,
-        seasonal_ar_order=SARIMA_CAP_P, seasonal_diff_order=SARIMA_CAP_D, seasonal_ma_order=SARIMA_CAP_Q,
+        ar_order=ret_order['p'], diff_order=ret_order['d'], ma_order=ret_order['q'],
+        seasonal_ar_order=ret_order['P'], seasonal_diff_order=ret_order['D'], seasonal_ma_order=ret_order['Q'],
         seasonal_period=SARIMA_S,
         iterations=ITERATIONS, learning_rate=LEARNING_RATE
     )
@@ -760,12 +1161,12 @@ for segment in segments:
         'historical_total': segment_df['total_net_units'].values
     }
     
-    print(f"\n{segment} Forecast:")
+    print(f"\n{segment} Forecast (orders: net_sales={ns_order}, returns={ret_order}):")
     for i in range(forecast_horizon):
         print(f"  {forecast_dates[i].strftime('%Y-%m')}: Net={forecast_ns[i]:.0f}, Returns={forecast_ret[i]:.0f}, Total={forecast_total[i]:.0f}")
 
 
-# ## 14. Forecast Visualization
+# ## 15. Forecast Visualization
 
 # In[ ]:
 
@@ -806,7 +1207,7 @@ plt.show()
 print("\nForecast visualization saved.")
 
 
-# ## 15. Export Results
+# ## 16. Export Results
 
 # In[ ]:
 
@@ -831,20 +1232,28 @@ print("Forecasts exported to: ../dataset/sarima_forecasts.csv")
 print(forecasts_df.head(15).to_string())
 
 
-# ## 16. Summary
+# ## 17. Summary
 
 # In[ ]:
 
 
 print("\n" + "="*60)
-print("SARIMA REFACTORED PIPELINE COMPLETE")
+print("SARIMA IMPROVED PIPELINE COMPLETE")
 print("="*60)
 print(f"\nModels trained: {len(segments) * 2}")
 print(f"\nKey Features:")
-print("  - Log transform with shift constant (no Z-score)")
-print("  - Joint AR+MA training (coherent ARMA)")
+print("  - True multiplicative SARIMA with seasonal AR/MA terms")
+print("  - Seasonal interaction lags (e.g., 1+12=13)")
+print("  - Grid search per segment (24 order combinations)")
+print("  - Rolling-origin cross-validation for model selection")
+print("  - Residual diagnostics filtering")
+print("  - Log transform with shift constant")
 print("  - Correct inverse double differencing")
 print("  - Baseline comparisons logged")
-print("  - Full model state persisted")
+print(f"\nSelected Orders per Segment:")
+for seg in best_orders:
+    print(f"  {seg}:")
+    for target, order in best_orders[seg].items():
+        print(f"    {target}: ({order['p']},{order['d']},{order['q']})({order['P']},{order['D']},{order['Q']})[{SARIMA_S}]")
 print(f"\nMLflow Experiment: {EXPERIMENT_NAME}")
 print("\nTo view MLflow UI: mlflow ui --port 5000")
