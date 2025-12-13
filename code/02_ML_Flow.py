@@ -50,12 +50,17 @@ SARIMA_S = 12
 train_end_date = pd.Timestamp('2025-01-01')
 test_end_date = pd.Timestamp('2025-10-01')
 
-ITERATIONS = 20_000
-LEARNING_RATE = 0.001
+ITERATIONS = 10_000
+LEARNING_RATE = 0.01
 L2_REGULARIZATION = 0.0001
 
 INITIAL_TRAIN_SIZE = 15
-HORIZON = 12
+HORIZON = 4
+
+TARGET_DIFF_CONFIG = {
+    'net_sales_units': {'d': 1, 'D': 1},
+    'returns_units': {'d': 1, 'D': 1},
+}
 
 os.makedirs(ARTIFACTS_DIR, exist_ok=True)
 
@@ -93,17 +98,37 @@ def inverse_log_transform(z, shift_constant):
 # In[ ]:
 
 
-def double_difference(z, seasonal_period=12):
-    seasonal_diff = z[seasonal_period:] - z[:-seasonal_period]
-    w = seasonal_diff[1:] - seasonal_diff[:-1]
-    return w, seasonal_diff
+def apply_differencing(z, d, D, s):
+    if D == 1 and d == 0:
+        w = z[s:] - z[:-s]
+        return w
+    elif D == 1 and d == 1:
+        seasonal_diff = z[s:] - z[:-s]
+        w = seasonal_diff[1:] - seasonal_diff[:-1]
+        return w
+    elif D == 0 and d == 1:
+        w = z[1:] - z[:-1]
+        return w
+    elif D == 0 and d == 0:
+        return z.copy()
+    else:
+        raise ValueError(f"Unsupported differencing: d={d}, D={D}")
 
 
-def inverse_double_difference(w_forecast, log_history, seasonal_period=12):
+def invert_differencing(w_forecast, log_history, d, D, s):
     z_extended = list(log_history)
     
     for w in w_forecast:
-        z_new = w + z_extended[-1] + z_extended[-seasonal_period] - z_extended[-seasonal_period - 1]
+        if D == 1 and d == 0:
+            z_new = w + z_extended[-s]
+        elif D == 1 and d == 1:
+            z_new = w + z_extended[-1] + z_extended[-s] - z_extended[-s - 1]
+        elif D == 0 and d == 1:
+            z_new = w + z_extended[-1]
+        elif D == 0 and d == 0:
+            z_new = w
+        else:
+            raise ValueError(f"Unsupported differencing: d={d}, D={D}")
         z_extended.append(z_new)
     
     return np.array(z_extended[len(log_history):])
@@ -294,7 +319,7 @@ def sarima_fit(data, p, d, q, P, D, Q, s, iterations, learning_rate):
     shift_constant = compute_log_shift(data)
     log_data = log_transform(data, shift_constant)
     
-    w, seasonal_diff = double_difference(log_data, s)
+    w = apply_differencing(log_data, d=d, D=D, s=s)
     
     lag_structure = build_sarima_lag_structure(p, q, P, Q, s)
     max_lag = max(lag_structure['max_ar_lag'], lag_structure['max_ma_lag'], 1)
@@ -322,6 +347,15 @@ def sarima_fit(data, p, d, q, P, D, Q, s, iterations, learning_rate):
     
     diff_tail_len = max(max_lag, s + 1)
     
+    if D == 1 and d == 0:
+        log_history_len = s
+    elif D == 1 and d == 1:
+        log_history_len = s + 1
+    elif D == 0 and d == 1:
+        log_history_len = 1
+    else:
+        log_history_len = s + 1
+    
     return {
         'shift_constant': shift_constant,
         'ar_coeffs': fit_result['ar_coeffs'],
@@ -331,7 +365,7 @@ def sarima_fit(data, p, d, q, P, D, Q, s, iterations, learning_rate):
         'seasonal_ma_coeffs': fit_result['seasonal_ma_coeffs'],
         'interaction_ma_coeffs': fit_result['interaction_ma_coeffs'],
         'lag_structure': fit_result['lag_structure'],
-        'log_history': list(log_data[-(s + 1):]),
+        'log_history': list(log_data[-log_history_len:]),
         'diff_tail': list(w[-diff_tail_len:]),
         'residual_tail': fit_result['residual_tail'],
         'in_sample_predictions': np.array(in_sample_predictions),
@@ -346,6 +380,8 @@ def sarima_fit(data, p, d, q, P, D, Q, s, iterations, learning_rate):
 
 def sarima_forecast(model_state, num_steps):
     s = model_state['s']
+    d = model_state.get('d', 1)
+    D = model_state.get('D', 1)
     log_history = model_state['log_history']
     diff_tail = list(model_state['diff_tail'])
     residual_tail = list(model_state['residual_tail'])
@@ -377,7 +413,7 @@ def sarima_forecast(model_state, num_steps):
         if len(residual_tail) > max_ma_lag:
             residual_tail.pop(0)
     
-    z_forecast = inverse_double_difference(w_forecast, log_history, s)
+    z_forecast = invert_differencing(w_forecast, log_history, d, D, s)
     y_forecast = inverse_log_transform(z_forecast, shift_constant)
     y_forecast = np.maximum(y_forecast, 0)
     
@@ -470,7 +506,9 @@ class SARIMAModel(mlflow.pyfunc.PythonModel):
         
         model_state = {
             'p': self.ar_order,
+            'd': self.diff_order,
             'q': self.ma_order,
+            'D': self.seasonal_diff_order,
             's': self.seasonal_period,
             'ar_coeffs': self.ar_coeffs,
             'seasonal_ar_coeffs': self.seasonal_ar_coeffs,
@@ -1026,6 +1064,11 @@ for segment in segments:
     
     for target_col, target_label in targets.items():
         print(f"\n  Target: {target_label}")
+        
+        target_diff = TARGET_DIFF_CONFIG.get(target_col, {'d': SARIMA_D, 'D': SARIMA_CAP_D})
+        target_d = target_diff['d']
+        target_D = target_diff['D']
+        print(f"    Differencing: d={target_d}, D={target_D} (seasonal-only={target_d==0})")
         print(f"    Running grid search on training data only...")
         
         train_data, test_data, train_dates, test_dates = split_data(
@@ -1034,7 +1077,7 @@ for segment in segments:
         
         best_order, search_results = grid_search_sarima(
             train_data,
-            s=SARIMA_S, d=SARIMA_D, D=SARIMA_CAP_D,
+            s=SARIMA_S, d=target_d, D=target_D,
             p_range=(0, 1), q_range=(0, 1, 2),
             P_range=(0, 1), Q_range=(0, 1),
             iterations=ITERATIONS, learning_rate=LEARNING_RATE
@@ -1051,8 +1094,8 @@ for segment in segments:
                 safe_P = SARIMA_CAP_P if n_after_diff >= SARIMA_S + SARIMA_CAP_P + 1 else 0
                 safe_Q = SARIMA_CAP_Q if n_after_diff >= SARIMA_S + SARIMA_CAP_Q + 1 else 0
             
-            p, d, q = safe_p, SARIMA_D, safe_q
-            P, D, Q = safe_P, SARIMA_CAP_D, safe_Q
+            p, d, q = safe_p, target_d, safe_q
+            P, D, Q = safe_P, target_D, safe_Q
             print(f"    Grid search failed, using safe fallback: ({p},{d},{q})({P},{D},{Q})[{SARIMA_S}]")
         else:
             p, d, q = best_order['p'], best_order['d'], best_order['q']
@@ -1127,10 +1170,13 @@ for segment in segments:
     full_net_sales = segment_df['net_sales_units'].values
     full_returns = segment_df['returns_units'].values
     
+    ns_diff = TARGET_DIFF_CONFIG.get('net_sales_units', {'d': 1, 'D': 1})
+    ret_diff = TARGET_DIFF_CONFIG.get('returns_units', {'d': 1, 'D': 1})
+    
     ns_order = best_orders.get(segment, {}).get('net_sales', 
-        {'p': SARIMA_P, 'd': SARIMA_D, 'q': SARIMA_Q, 'P': SARIMA_CAP_P, 'D': SARIMA_CAP_D, 'Q': SARIMA_CAP_Q})
+        {'p': SARIMA_P, 'd': ns_diff['d'], 'q': SARIMA_Q, 'P': SARIMA_CAP_P, 'D': ns_diff['D'], 'Q': SARIMA_CAP_Q})
     ret_order = best_orders.get(segment, {}).get('returns',
-        {'p': SARIMA_P, 'd': SARIMA_D, 'q': SARIMA_Q, 'P': SARIMA_CAP_P, 'D': SARIMA_CAP_D, 'Q': SARIMA_CAP_Q})
+        {'p': SARIMA_P, 'd': ret_diff['d'], 'q': SARIMA_Q, 'P': SARIMA_CAP_P, 'D': ret_diff['D'], 'Q': SARIMA_CAP_Q})
     
     model_ns = SARIMAModel(
         ar_order=ns_order['p'], diff_order=ns_order['d'], ma_order=ns_order['q'],
