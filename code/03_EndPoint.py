@@ -2,10 +2,7 @@
 SARIMA Model Inference API
 
 This module provides a REST API for serving SARIMA forecasting models trained with MLflow.
-It allows users to:
-- List available trained models
-- Select/switch the active model for inference
-- Generate forecasts for specific segments and date ranges
+
 """
 
 import os

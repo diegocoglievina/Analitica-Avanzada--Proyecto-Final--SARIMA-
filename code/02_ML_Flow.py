@@ -4,14 +4,6 @@
 # # SARIMA From Scratch with MLflow
 # 
 # Monthly sales forecasting using custom SARIMA implementation (no statsmodels).
-# 
-# **Key Features:**
-# - Log transform with shift constant (no Z-score normalization)
-# - Explicit double differencing: Seasonal(12) → Regular(1)
-# - Correct inverse differencing for forecast reconstruction
-# - Joint AR+MA training with shared residuals
-# - Baseline comparisons (seasonal naive)
-# - Complete MLflow state persistence for reproducible inference
 
 # ## 1. Setup and Configuration
 
@@ -55,7 +47,7 @@ LEARNING_RATE = 0.01
 L2_REGULARIZATION = 0.0001
 
 INITIAL_TRAIN_SIZE = 15
-HORIZON = 4
+HORIZON = 3
 
 TARGET_DIFF_CONFIG = {
     'net_sales_units': {'d': 1, 'D': 1},

@@ -1,0 +1,706 @@
+\documentclass[aspectratio=169,11pt]{beamer}
+
+% ----------------------------
+% Encoding and language
+% ----------------------------
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+
+% ----------------------------
+% Math and symbols
+% ----------------------------
+\usepackage{amsmath,amssymb,mathtools}
+
+% ----------------------------
+% Figures and tables
+% ----------------------------
+\usepackage{graphicx}
+\usepackage{booktabs}
+
+% ----------------------------
+% Code blocks
+% ----------------------------
+\usepackage{listings}
+\usepackage{xcolor}
+
+% ----------------------------
+% Links
+% ----------------------------
+\usepackage{hyperref}
+
+\graphicspath{{img/}}
+
+\usetheme{Analitica}
+
+% Speaker notes (keep hidden in PDF by default)
+\setbeameroption{hide notes}
+
+% ----------------------------
+% Listings configuration
+% ----------------------------
+\lstdefinestyle{bash}{
+  language=bash,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue},
+  commentstyle=\color{gray},
+  stringstyle=\color{teal},
+  showstringspaces=false,
+  breaklines=true,
+  columns=fullflexible
+}
+
+\lstdefinestyle{json}{
+  basicstyle=\ttfamily\small,
+  showstringspaces=false,
+  breaklines=true,
+  columns=fullflexible
+}
+
+% ----------------------------
+% Title metadata
+% ----------------------------
+\title{Demand Forecasting}
+\subtitle{Multiplicative SARIMA from Scratch}
+\author{Diego Coglievina Díaz \and Juan Jesús Orihuela Torres}
+\institute{Universidad Anáhuac Querétaro}
+\date{\today}
+
+% ----------------------------
+% Section TOC at section start
+% ----------------------------
+\AtBeginSection[]{
+  \begin{frame}{Roadmap}
+    \tableofcontents[currentsection]
+  \end{frame}
+}
+
+\begin{document}
+
+% ============================================================
+% TITLE
+% ============================================================
+\begin{frame}[plain]
+  \titlepage
+  \note{
+    Goal: teach the full end-to-end project. Emphasize that we did not use a black-box SARIMA,
+    we implemented the multiplicative structure and deployment ourselves.
+  }
+\end{frame}
+
+\begin{frame}{Repository and Deliverables}
+  \begin{itemize}
+    \item Code repository: \url{https://github.com/diegocoglievina/Analitica-Avanzada--Proyecto-Final--SARIMA-}
+    \item Reproducibility: notebooks for EDA, production scripts for training and inference, plus requirements.
+    \item MLOps: MLflow for tracking experiments and serving artifacts.
+    \item Deployment: Flask API for inference.
+  \end{itemize}
+
+\end{frame}
+
+\begin{frame}{Agenda}
+  \tableofcontents
+  \note{
+    Tell the audience: we start from business context, then data, then the model mathematics,
+    then how we estimate and validate, then deployment.
+  }
+\end{frame}
+
+% ============================================================
+% BUSINESS CONTEXT
+% ============================================================
+\section{Business Context}
+
+\begin{frame}{Operating Landscape}
+  \begin{itemize}
+    \item Multi-echelon supply chain with three channels: OEM, Dealer (Aftermarket), Professional End-Users.
+    \item Dealer channel is the most volatile, OEM is contract-driven but penalizes stockouts.
+    \item Forecast error has direct cost: overstock immobilizes capital, understock causes lost sales and penalties.
+  \end{itemize}
+
+\end{frame}
+
+\begin{frame}{Problem and Value Proposition}
+  \begin{itemize}
+    \item Objective: robust monthly forecasts that capture both seasonality and volatility.
+    \item We forecast \textbf{Sales} and \textbf{Returns} separately to expose net cash-relevant flow.
+    \item We implement multiplicative SARIMA with explicit interaction lags, plus L2 regularization.
+    \item Model selection: grid search + rolling-origin cross-validation before deployment.
+  \end{itemize}
+  \begin{block}{Objective}
+    We do not only predict ``how much will be sold''. We also predict ``how much comes back'', and net it in a controlled way.
+  \end{block}
+  \note{
+    Highlight why returns matter: they are not noise, they are a business process.
+  }
+\end{frame}
+
+\begin{frame}{What We Built (End-to-End)}
+  \begin{enumerate}
+    \item Convert daily transactions into a clean monthly panel (Sales vs Returns).
+    \item Transform series for stationarity (log, seasonal differencing, regular differencing).
+    \item Train multiplicative SARIMA from scratch with explicit polynomial expansion.
+    \item Validate using rolling-origin CV and compare to a seasonal naive baseline.
+    \item Register best models in MLflow and serve them via a Flask API.
+  \end{enumerate}
+
+\end{frame}
+
+% ============================================================
+% EDA
+% ============================================================
+\section{EDA Highlights}
+
+\begin{frame}{Distribution of Transactions}
+  \centering
+  \includegraphics[width=\linewidth,height=0.72\textheight,keepaspectratio]{Distribution_of_Amount.jpeg}
+  \medskip
+
+\end{frame}
+
+\begin{frame}{Aggregated Monthly Series}
+  \centering
+  \includegraphics[width=\linewidth,height=0.72\textheight,keepaspectratio]{Sales_Time_Series.jpeg}
+\end{frame}
+
+\begin{frame}{ACF by Segment (Seasonality Evidence)}
+  \begin{itemize}
+    \item Dealer ACF: strong spikes at multiples of 12 plus slower decay (high persistence and volatility).
+    \item OEM ACF: seasonal spikes with less noise (often lower-order models work).
+    \item Professional End-Users ACF: seasonality present, lower variance than Dealer.
+  \end{itemize}
+  \begin{block}{In simple terms}
+    Spikes at 12, 24, 36 mean ``this month is related to the same month last year''.
+  \end{block}
+  \note{
+    Mention: ACF is correlation with lagged versions of the same series.
+  }
+\end{frame}
+
+\begin{frame}{ACF after Log Transform}
+  \centering
+  \includegraphics[width=\linewidth,height=0.72\textheight,keepaspectratio]{ACF_Log-transform_of_Total_Sales.jpeg}
+  \medskip
+  \begin{itemize}
+    \item Variance becomes more stable, but seasonal memory persists.
+    \item Supports seasonal differencing with $S=12$.
+  \end{itemize}
+\end{frame}
+
+% ============================================================
+% DATA PIPELINE
+% ============================================================
+\section{Data Pipeline}
+
+\begin{frame}{From Transactions to Monthly Panel}
+  \begin{itemize}
+    \item Filter to \texttt{Account == "Sales Units"} and remove zero \texttt{Amount}.
+    \item Split by sign:
+      \begin{itemize}
+        \item \texttt{net\_sales\_units}: sum of positive transactions.
+        \item \texttt{returns\_units}: sum of absolute value of negative transactions.
+      \end{itemize}
+    \item Aggregate monthly per segment and build a continuous month index.
+    \item Fill missing months with zeros so the time axis is complete.
+  \end{itemize}
+  \begin{block}{In simple terms}
+    We convert a messy event stream into clean monthly signals that the model can interpret as ``one value per month''.
+  \end{block}
+\end{frame}
+
+\begin{frame}{Transforms for Stationarity (Why and How)}
+  \begin{itemize}
+    \item \textbf{Shifted log:} $y'_t = \log(y_t + c)$ to stabilize variance.
+    \item \textbf{Seasonal differencing:} remove repeating annual level ($S=12$).
+    \item \textbf{Regular differencing:} remove residual trend if present.
+    \item \textbf{Diagnostics:} ACF/PACF + ADF/KPSS to avoid under or over differencing.
+  \end{itemize}
+
+  \begin{block}{In simple terms}
+    The goal is to transform the series into a form where its average and variability look stable over time.
+  \end{block}
+
+  \note{
+    Keep it intuitive: we are preparing the series so that patterns repeat in a stable way.
+  }
+\end{frame}
+
+\begin{frame}{ADF and KPSS (Complementary Diagnostics)}
+  \begin{itemize}
+    \item \textbf{ADF}: null hypothesis = unit root (non-stationary). Small $p$ suggests stationarity after differencing.
+    \item \textbf{KPSS}: null hypothesis = stationary. Large $p$ supports stationarity.
+    \item Using both reduces the risk of wrong differencing order.
+  \end{itemize}
+
+  \begin{block}{In simple terms}
+    One test asks: ``is it still non-stationary?'' The other asks: ``can we treat it as stationary now?''
+  \end{block}
+
+  \note{
+    Mention: over-differencing can create artificial negative autocorrelation.
+  }
+\end{frame}
+
+% ============================================================
+% MATH FRAMEWORK
+% ============================================================
+\section{Mathematical Framework}
+
+\begin{frame}{Objects and Notation}
+  \begin{itemize}
+    \item Observed series $\{y_t\}$ is one realization of a stochastic process $\{Y_t\}$.
+    \item Backshift operator $B$: $BY_t=Y_{t-1}$, $B^kY_t=Y_{t-k}$.
+    \item Differencing is just subtraction with this operator: $\nabla = 1-B$.
+  \end{itemize}
+  \begin{block}{In simple terms}
+    $B$ means ``go back in time''. Differencing means ``compare to the past''.
+  \end{block}
+  \note{
+    Explain quickly: operator notation is shorthand so models can be written as polynomials.
+  }
+\end{frame}
+
+\begin{frame}{White Noise and Innovations (The Driving Randomness)}
+  \begin{itemize}
+    \item Innovations $\{w_t\}$ are modeled as i.i.d. with
+      \[
+        \mathbb{E}[w_t]=0,\qquad \mathrm{Var}(w_t)=\sigma_w^2,\qquad \mathrm{Cov}(w_t,w_{t-k})=0\ (k\neq 0).
+      \]
+    \item Often assumed Gaussian for likelihood-based estimation, but the core idea is ``uncorrelated shocks''.
+  \end{itemize}
+  \begin{block}{In simple terms}
+    Mean $0$ means shocks have no systematic direction. Constant variance means shocks have roughly the same typical size over time.
+    Zero covariance means shocks do not persist by themselves.
+  \end{block}
+  \note{
+    Correct a common misconception: variance is not 0, the mean is 0.
+  }
+\end{frame}
+
+\begin{frame}{AR, MA, ARMA (Why They Work)}
+  \begin{itemize}
+    \item AR($p$): today depends on past values plus a new shock.
+    \item MA($q$): today depends on recent shocks, which creates short memory.
+    \item ARMA combines both to match richer autocorrelation shapes.
+  \end{itemize}
+
+  \vspace{0.3em}
+  \[
+    \phi_p(B)(X_t-\mu)=\theta_q(B)w_t
+  \]
+
+  \begin{block}{In simple terms}
+    AR explains persistence using past values. MA explains persistence using delayed impact of shocks.
+  \end{block}
+
+  \note{
+    If asked: invertibility makes MA identifiable and stable. Keep it short.
+  }
+\end{frame}
+
+\begin{frame}{ARIMA: Making ARMA Work for Trend}
+  \begin{itemize}
+    \item Real data often has trend, so ARMA on $Y_t$ fails because mean is not stable.
+    \item ARIMA applies differencing first:
+      \[
+        X_t=\nabla^d Y_t=(1-B)^d Y_t,
+      \]
+      and then fits ARMA to $X_t$.
+  \end{itemize}
+
+  \begin{block}{In simple terms}
+    If the series keeps drifting upward or downward, we model the changes between months instead of raw levels.
+  \end{block}
+
+  \note{
+    Stress the pipeline logic: difference first, then fit ARMA to the transformed series.
+  }
+\end{frame}
+
+\begin{frame}{SARIMA: Extending ARIMA with Seasonality}
+  \begin{itemize}
+    \item Monthly seasonality means strong dependence at lag $S=12$.
+    \item Seasonal differencing:
+      \[
+        \nabla_{12}Y_t=(1-B^{12})Y_t=Y_t-Y_{t-12}.
+      \]
+    \item Multiplicative SARIMA combines seasonal and non-seasonal polynomials:
+      \[
+        \Phi_P(B^{12})\,\phi_p(B)\,(X_t-\mu)=\Theta_Q(B^{12})\,\theta_q(B)\,w_t.
+      \]
+  \end{itemize}
+
+  \begin{block}{In simple terms}
+    Seasonal differencing asks: ``how different is this month from the same month last year?''
+  \end{block}
+
+  \note{
+    The multiplicative part is crucial. It creates interaction lags.
+  }
+\end{frame}
+
+\begin{frame}{Why Interaction Lags Appear (Key Implementation Detail)}
+  \[
+    (1-\phi_1B)(1-\Phi_1B^{12})
+    = 1-\phi_1B-\Phi_1B^{12}+\phi_1\Phi_1B^{13}.
+  \]
+  \begin{itemize}
+    \item Multiplication creates a cross-lag at $13=1+12$.
+    \item Our implementation explicitly includes these induced lags instead of ignoring them.
+  \end{itemize}
+
+  \begin{block}{In simple terms}
+    ``One month effect'' and ``one year effect'' combine into ``one month after one year'' automatically.
+  \end{block}
+
+  \note{
+    This is one of the reasons black-box approximations can be mathematically inconsistent.
+  }
+\end{frame}
+
+% ============================================================
+% ESTIMATION AND VALIDATION
+% ============================================================
+\section{Estimation and Validation}
+
+\begin{frame}{Training Objective (What We Optimize)}
+  \begin{itemize}
+    \item We estimate coefficients by minimizing one-step prediction error.
+    \item Loss with L2 regularization:
+      \[
+        J(\boldsymbol{\Omega})=\tfrac{1}{2}\sum_t e_t^2 + \tfrac{\lambda}{2}\|\boldsymbol{\Omega}\|_2^2.
+      \]
+  \end{itemize}
+
+  \begin{block}{In simple terms}
+    We want small prediction errors, but we also penalize overly large coefficients to avoid unstable forecasts.
+  \end{block}
+
+  \note{
+    L2 is also a stability tool for recursive MA behavior.
+  }
+\end{frame}
+
+\begin{frame}{SGD Update (How Parameters Move)}
+  \[
+    \boldsymbol{\Omega}^{(k+1)}=(1-\eta\lambda)\boldsymbol{\Omega}^{(k)}+\eta\,e_{t_k}\,\mathbf{x}_{t_k}.
+  \]
+
+  \begin{itemize}
+    \item $\mathbf{x}_{t_k}$: lagged inputs (including interaction lags).
+    \item $e_{t_k}$: one-step residual $X_{t_k}-\widehat{X}_{t_k}$.
+    \item $\eta$: learning rate, $\lambda$: shrinkage strength.
+  \end{itemize}
+
+  \begin{block}{In simple terms}
+    If we under-predict, coefficients move in the direction that increases the next prediction, but shrinkage keeps updates conservative.
+  \end{block}
+
+  \note{
+    Explain sign intuition: error times input gives the direction. Do not expand gradients.
+  }
+\end{frame}
+
+\begin{frame}{Baseline and Evaluation Metric}
+  \begin{itemize}
+    \item Baseline: seasonal naive (repeat last year's same month):
+      \[
+        \hat{y}_{t+h}^{\,\text{baseline}} = y_{t+h-12}.
+      \]
+    \item Primary metric: RMSE, penalizes large errors:
+      \[
+        \mathrm{RMSE}=\sqrt{\tfrac{1}{n}\sum_{i=1}^n(\hat{y}_i-y_i)^2}.
+      \]
+  \end{itemize}
+
+  \begin{block}{In simple terms}
+    The baseline is ``do what happened last year''. If we cannot beat that, the model is not worth deploying.
+  \end{block}
+
+  \note{
+    Strong teaching point: baselines prevent self-deception.
+  }
+\end{frame}
+
+\begin{frame}{Grid Search + Rolling-Origin Cross-Validation}
+  \begin{itemize}
+    \item Fix $(d,D,S)=(1,1,12)$ from diagnostics, search over $(p,q,P,Q)$.
+    \item Rolling-origin CV: train on an expanding window, forecast $h=3$, repeat, average error.
+  \end{itemize}
+
+  \begin{block}{In simple terms}
+    We test the model the same way it will be used: train on the past, predict the future, move forward, repeat.
+  \end{block}
+
+  \note{
+    Mention why: time series cannot use random shuffle splits.
+  }
+\end{frame}
+
+% ============================================================
+% DEPLOYMENT
+% ============================================================
+\section{Deployment}
+
+\begin{frame}{MLOps with MLflow (Why It Matters)}
+  \begin{itemize}
+    \item Track experiments: parameters, metrics, artifacts, and run metadata.
+    \item Register best models and load them later for inference.
+    \item This enables reproducible promotion to ``Production'' without manual file handling.
+  \end{itemize}
+
+  \begin{block}{In simple terms}
+    MLflow is our system of record. It answers: which model, trained when, with what settings, performed how.
+  \end{block}
+
+  \note{
+    Keep it practical: avoids losing the best run and enables controlled deployment.
+  }
+\end{frame}
+
+\begin{frame}{Flask API (Production Path)}
+  \begin{itemize}
+    \item Model discovery and loading:
+      \begin{itemize}
+        \item \texttt{GET /models} lists available runs and metadata.
+        \item \texttt{POST /models/load} loads a specific run into memory for inference.
+      \end{itemize}
+    \item Inference:
+      \begin{itemize}
+        \item \texttt{POST /predict} forecasts a single segment and target.
+        \item \texttt{POST /predict/batch} forecasts Sales and Returns and computes total net forecast.
+      \end{itemize}
+    \item Rate limiting per IP to prevent overload.
+  \end{itemize}
+
+  \begin{block}{In simple terms}
+    The API is the bridge: business systems send JSON, the server returns a forecast vector with dates.
+  \end{block}
+
+  \note{
+    Avoid dashboard discussion. Focus on endpoints and contracts.
+  }
+\end{frame}
+
+\begin{frame}[fragile]{Endpoint Example: \texttt{/predict} (Request and Response)}
+\begin{columns}[T,onlytextwidth]
+\column{0.48\textwidth}
+\textbf{Request (JSON)}
+\begin{lstlisting}[style=json]
+{
+  "segment": "DEALER",
+  "target": "net_sales",
+  "num_periods": 12,
+  "start_date": "2025-01-01"
+}
+\end{lstlisting}
+
+\column{0.52\textwidth}
+\textbf{Response (JSON)}
+\begin{lstlisting}[style=json]
+{
+  "segment": "DEALER",
+  "target": "net_sales",
+  "num_periods": 12,
+  "forecasts": [
+    {"month":"2025-01","forecast_value":1234},
+    {"month":"2025-02","forecast_value":1189}
+  ]
+}
+\end{lstlisting}
+\end{columns}
+
+\end{frame}
+
+\begin{frame}{Endpoint Example: \texttt{/predict/batch} (Server-Side Netting)}
+  \begin{itemize}
+    \item The server forecasts \texttt{net\_sales} and \texttt{returns} for the same segment and horizon.
+    \item Then it computes:
+      \[
+        \texttt{total\_net}_t=\max(\texttt{net\_sales}_t-\texttt{returns}_t,\,0).
+      \]
+  \end{itemize}
+
+  \begin{block}{In simple terms}
+    Clients should not implement business arithmetic themselves. The server returns one consistent net series every time.
+  \end{block}
+
+  \note{
+    Mention: netting on server reduces integration bugs and ensures consistent logic across consumers.
+  }
+\end{frame}
+
+\begin{frame}{Rate Limiting (Why We Added It)}
+  \begin{itemize}
+    \item Goal: keep latency stable and prevent a single client from exhausting resources.
+    \item Mechanism: per-IP request limit over a short time window.
+    \item On violation: return \texttt{HTTP 429} and instruct the client to retry later.
+  \end{itemize}
+
+  \begin{block}{In simple terms}
+    Even a good model can fail in production if the server is overloaded. Rate limiting protects the service.
+  \end{block}
+
+  \note{
+    If asked: in-memory means per-process and resets on restart.
+  }
+\end{frame}
+
+% ============================================================
+% RESULTS
+% ============================================================
+\section{Results}
+
+\begin{frame}{Forecast Highlights}
+  \begin{itemize}
+    \item Model captures the recurring seasonal dip and recovery observed in history.
+    \item Dealer segment, the most volatile, shows improved RMSE vs seasonal naive.
+    \item Returns forecasts reduce fiscal surprises and improve net visibility.
+  \end{itemize}
+
+  \begin{block}{In simple terms}
+    Better forecasts are measured against a strong baseline and translated into business value: fewer surprises, better planning.
+  \end{block}
+
+  \note{
+    Connect to business context again: stockouts, overstock, penalties, cash flow.
+  }
+\end{frame}
+
+\begin{frame}{Forecast Visualization}
+  \centering
+  \includegraphics[width=\linewidth,height=0.78\textheight,keepaspectratio]{sarima_forecast_visualization.png}
+  \note{
+    Narrate: show train region, forecast horizon, and the seasonal structure.
+  }
+\end{frame}
+
+\begin{frame}{Accuracy vs Baseline}
+  \centering
+  \begin{tabular}{llccc}
+    \toprule
+    Segment & Target & SARIMA RMSE & Baseline RMSE & Outcome \\
+    \midrule
+    Dealer & Net Sales & 3672.19 & 3685.09 & \textbf{Better} \\
+    Dealer & Returns   & 2470.63 & 2699.63 & \textbf{Better} \\
+    OEM    & Net Sales & 291.86  & 143.26  & Baseline Better \\
+    OEM    & Returns   & 96.91   & 104.72  & \textbf{Better} \\
+    Pro Users & Net Sales & 430.48 & 449.39 & \textbf{Better} \\
+    Pro Users & Returns   & 96.62  & 101.76 & \textbf{Better} \\
+    \bottomrule
+  \end{tabular}
+
+  \begin{block}{In simple terms}
+    Beating the baseline is the minimum requirement. When baseline wins (OEM net sales), it signals either model mismatch or the need for exogenous drivers.
+  \end{block}
+
+  \note{
+    Do not hide OEM net sales result. Use it to show scientific honesty and next steps.
+  }
+\end{frame}
+
+% ============================================================
+% IMPLEMENTATION OVERVIEW (NO RAW CODE)
+% ============================================================
+\section{Implementation Overview}
+
+\begin{frame}{Training Script (02\_ML\_Flow.py) in One Slide}
+  \begin{itemize}
+    \item Build lag sets including interaction lags (example: $1+12=13$).
+    \item Fit with SGD on transformed series ($\log$ + seasonal diff + regular diff).
+    \item Rolling-origin CV selects stable orders; best models logged to MLflow.
+    \item Forecast inversion: undo differencing, inverse log, clamp to non-negative units.
+  \end{itemize}
+
+  \begin{block}{In simple terms}
+    The code is a controlled pipeline: transform, fit, validate, log, serve.
+  \end{block}
+
+  \note{
+    Mention: coefficient clipping and L2 are practical stability safeguards.
+  }
+\end{frame}
+
+\begin{frame}{Inference Script (03\_EndPoint.py) in One Slide}
+  \begin{itemize}
+    \item Load models from MLflow artifacts at runtime.
+    \item Validate JSON inputs (segment, target, horizon).
+    \item Produce forecast vectors indexed by calendar months.
+    \item Provide batch forecast and netting for downstream simplicity.
+  \end{itemize}
+
+  \begin{block}{In simple terms}
+    Training produces artifacts. The endpoint consumes artifacts and returns forecasts. This is the production boundary.
+  \end{block}
+
+  \note{
+    Reinforce separation of concerns: training is offline, inference is online.
+  }
+\end{frame}
+
+% ============================================================
+% CLOSING
+% ============================================================
+\section{Closing}
+
+\begin{frame}{Conclusion}
+  \begin{itemize}
+    \item Implemented multiplicative SARIMA from scratch with explicit seasonal interaction lags.
+    \item Used rigorous evaluation: rolling-origin CV and a strong seasonal baseline.
+    \item Deployed a reproducible, MLflow-backed Flask inference API.
+    \item Separate Sales and Returns improves interpretability and net planning.
+  \end{itemize}
+
+  \begin{block}{In simple terms}
+    This is a complete, deployable forecasting system, not just a notebook result.
+  \end{block}
+
+  \note{
+    Keep it crisp. Invite questions about assumptions and limitations.
+  }
+\end{frame}
+
+\begin{frame}{Limitations and Next Steps}
+  \begin{itemize}
+    \item Add exogenous drivers (SARIMAX): promotions, price, macro indicators, supply constraints.
+    \item Use Bayesian or smarter search for hyperparameters instead of small grids.
+    \item Produce prediction intervals for risk-aware planning (not only point forecasts).
+    \item Improve production hardening: persistent rate limits, caching, monitoring.
+  \end{itemize}
+
+  \begin{block}{In simple terms}
+    SARIMA captures internal time structure. Exogenous variables capture the outside world.
+  \end{block}
+
+  \note{
+    Tie to OEM result: baseline better suggests missing external signals.
+  }
+\end{frame}
+
+\begin{frame}{Live Demo Plan}
+  \begin{itemize}
+    \item Call \texttt{/models} to show available MLflow runs.
+    \item Load one model with \texttt{/models/load}.
+    \item Run \texttt{/predict} for Dealer net sales and show the returned vector.
+    \item Run \texttt{/predict/batch} to show server-side netting.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{References}
+  \begin{itemize}
+    \item Penn State STAT 510: Applied Time Series Analysis (ARIMA, SARIMA, diagnostics).
+    \item Project repository (code, artifacts, and reproducibility assets).
+  \end{itemize}
+  \note{
+    If asked: mention that slides focus on the project, detailed derivations are in the written report.
+  }
+\end{frame}
+
+\begin{frame}{Questions}
+  \note{
+    Ready to answer: why separate sales and returns, why multiplicative SARIMA, why baseline,
+    why rolling-origin, why OEM baseline wins.
+  }
+\end{frame}
+
+\end{document}

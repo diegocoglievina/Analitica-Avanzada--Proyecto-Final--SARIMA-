@@ -8,17 +8,6 @@ Original file is located at
 
 # Data Exploration and Time Series Analysis
 
-## Overview
-This notebook serves as the foundational step in the sales forecasting project. The primary objective is to inspect the raw daily sales data, understand its underlying distribution, and prepare it for statistical modeling (specifically SARIMA).
-
-## Key Objectives
-1.  **Data Quality Check**: Inspect data structure, handle outliers, and filter relevant transaction types.
-2.  **Univariate Analysis**: Analyze the distribution of sales quantities using histograms and standard deviation thresholds.
-3.  **Time Series Aggregation**: Convert transactional data into a monthly time series indexed by accounting periods.
-4.  **Signal Decomposition**: Separate gross sales (positive) from returns (negative) to analyze distinct behaviors.
-5.  **Stationarity Analysis**: Apply transformations (Log, Differencing) and statistical tests (ADF, KPSS) to ensure the series satisfies ARIMA assumptions.
-6.  **Correlation Analysis**: Examine ACF and PACF plots to determine potential autoregressive (AR) and moving average (MA) orders.
-
 ## 1. Environment Setup
 Importing necessary libraries and configuring the environment.
 """

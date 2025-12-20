@@ -1,0 +1,669 @@
+\documentclass[11pt, a4paper]{article}
+
+% --- Packages ---
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\usepackage{graphicx}      % For images
+\usepackage{amsmath, amssymb, amsfonts} % For Math
+\usepackage{booktabs}      % For professional tables
+\usepackage{hyperref}      % For hyperlinks
+\usepackage{float}         % To force image placement
+\usepackage{titlesec}      % For section formatting
+\usepackage{parskip}       % For paragraph spacing
+\usepackage{caption}       % For caption styling
+\usepackage{subcaption}    % For side-by-side images
+
+% --- Geometry Setup ---
+\geometry{
+    left=25mm,
+    right=25mm,
+    top=25mm,
+    bottom=25mm
+}
+
+% --- Title Data ---
+\title{\textbf{Strategic Demand Forecasting in the Automotive Sector: \\ A Custom Multiplicative SARIMA Implementation}}
+\author{\textbf{Diego Coglievina Díaz} \\ \textbf{Juan Jesús Orihuela Torres}}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+    \noindent This technical report documents the end-to-end development of a proprietary forecasting engine designed to optimize inventory management and negotiation strategies within the automotive supply chain. Departing from standard library implementations, this project introduces a custom \textbf{Multiplicative Seasonal Autoregressive Integrated Moving Average (SARIMA)} model optimized via Gradient Descent. The methodology integrates a rigorous grid search with rolling-origin cross-validation to select optimal hyperparameters for each customer segment. The solution architecture includes a robust data engineering pipeline, reproducible experiment tracking via MLflow, and a scalable Flask API for real-time inference. Results demonstrate that the model successfully captures complex seasonal dynamics and outperforms seasonal baselines across most key segments.
+\end{abstract}
+
+\newpage
+\tableofcontents
+\newpage
+
+% -------------------------------------------------------------------
+% SECTION 1: BUSINESS CONTEXT
+% -------------------------------------------------------------------
+\section{Business Context and Problem Definition}
+
+\subsection{Operational Landscape}
+The organization operates within the high-stakes ecosystem of automotive parts manufacturing and distribution. This sector is characterized by a multi-echelon supply chain with diverging demand patterns across its primary channels. Specifically, the business manages three critical segments:
+\begin{itemize}
+    \item \textbf{Original Equipment Manufacturers (OEM):} Characterized by contractual, high-volume production schedules where failure to supply results in severe line-down penalties.
+    \item \textbf{Dealer Network (Aftermarket):} A highly volatile channel driven by end-consumer behavior, break-fix cycles, and seasonality, representing the highest risk for forecast error.
+    \item \textbf{Professional End-Users:} A recurrent, service-oriented channel requiring consistent availability.
+\end{itemize}
+
+\subsection{Problem Statement}
+The core business challenge is the **inefficiency of capital allocation due to demand volatility**. Historically, reliance on reactive heuristics or static baselines (e.g., Seasonal Naive) has led to a dichotomy of operational risks:
+\begin{enumerate}
+    \item \textbf{Capital Immobilization (Overstocking):} To buffer against volatility in the Dealer segment, the organization maintains excessive safety stock, tying up liquidity that could be deployed elsewhere.
+    \item \textbf{Margin Erosion via Reverse Logistics:} A lack of visibility into future \textit{Returns} volume creates financial blindsides. Returns in this industry are not merely logistical events but fiscal reversals involving tax credits and inventory depreciation.
+\end{enumerate}
+
+\subsection{Solution Value and Strategic Justification}
+This project implements a proprietary forecasting engine designed to transition the organization from reactive planning to predictive optimization. The value of this custom solution rests on three pillars:
+
+\subsubsection{1. Precision in Volatile Markets via Regularization}
+Off-the-shelf statistical packages often fail to converge or overfit when applied to highly volatile series like the Dealer segment. By building the SARIMA algorithm from scratch using \textbf{Gradient Descent with L2 Regularization}, we enforce stability in the model parameters. This directly translates to more reliable long-term forecasts (12-month horizon), allowing the supply chain team to reduce safety stock levels without compromising service rates.
+
+\subsubsection{2. Net Margin Visibility (Dual-Target Prediction)}
+Unlike traditional systems that forecast only "Net Sales," this solution treats \textbf{Sales} and \textbf{Returns} as independent, competing stochastic processes. By forecasting them separately and computing the net flow at inference time, the Finance department gains:
+\begin{itemize}
+    \item \textbf{Fiscal Anticipation:} Accurate projections of tax liabilities and credit issuance related to returns.
+    \item \textbf{Real Revenue Forecasting:} A true picture of cash flow, filtering out the noise of high-volume return periods (e.g., end-of-year inventory adjustments by dealers).
+\end{itemize}
+
+\subsubsection{3. Automated Negotiation Baseline}
+The deployment of this model via a REST API allows for the integration of unbiased, data-driven baselines into contract negotiations. When negotiating annual volume commitments with OEMs or Dealers, sales executives can rely on a statistically rigorous projection rather than intuition, shifting the negotiation leverage in favor of the organization.
+
+% -------------------------------------------------------------------
+% SECTION 2: EXPLORATORY DATA ANALYSIS
+% -------------------------------------------------------------------
+\section{Exploratory Data Analysis (EDA)}
+
+Before modeling, a comprehensive analysis of the raw data was conducted to understand distributions, trends, and seasonal patterns. This step is critical for determining the necessary transformations and the order of the SARIMA model.
+
+\subsection{Distribution Analysis}
+The distribution of transaction amounts was analyzed to identify skewness and potential outliers. As shown in Figure \ref{fig:dist}, the data is highly right-skewed, indicating that while most transactions are of lower value, there are significant high-value outliers that could bias a linear model if not addressed via transformation.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.7\textwidth]{exploration/Distribution_of_Amount.jpeg}
+    \caption{Distribution of Sales Amounts showing significant right-skewness.}
+    \label{fig:dist}
+\end{figure}
+
+\subsection{Time Series Structure}
+The aggregated sales time series (Figure \ref{fig:ts_plot}) reveals non-stationary behaviors, specifically a changing mean (trend) and variance over time.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{exploration/Sales_Time_Series.jpeg}
+    \caption{Aggregated Sales Time Series. Note the variance instability over time.}
+    \label{fig:ts_plot}
+\end{figure}
+
+\subsection{Autocorrelation Analysis (ACF)}
+The Autocorrelation Function (ACF) is the primary tool for identifying seasonality and the order of Moving Average (MA) terms. Theoretically, a seasonal series will show spikes at lags that are multiples of the seasonal period $s$.
+
+Figures \ref{fig:acf_segments} displays the ACF for the three key segments. In all cases, we observe significant correlations at regular intervals, confirming the presence of seasonality.
+
+\begin{figure}[H]
+    \centering
+    \begin{subfigure}[b]{0.45\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{exploration/ACF_Dealer.jpeg}
+        \caption{ACF: Dealer Segment}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.45\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{exploration/ACF OEM.jpeg}
+        \caption{ACF: OEM Segment}
+    \end{subfigure}
+    
+    \vspace{0.5cm}
+    
+    \begin{subfigure}[b]{0.45\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{exploration/ACF_Professional_End_User.jpeg}
+        \caption{ACF: Professional End Users}
+    \end{subfigure}
+    \caption{Autocorrelation Functions per Segment showing seasonal patterns.}
+    \label{fig:acf_segments}
+\end{figure}
+
+Finally, Figure \ref{fig:acf_log} shows the ACF of the total sales after a log transformation. This step helps visualize the persistence of the series after variance stabilization.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.7\textwidth]{exploration/ACF_Log-transform_of_Total_Sales.jpeg}
+    \caption{ACF of Log-Transformed Total Sales.}
+    \label{fig:acf_log}
+\end{figure}
+
+% -------------------------------------------------------------------
+% SECTION 3: DATA ENGINEERING
+% -------------------------------------------------------------------
+\section{Data Engineering and Transformation Pipeline}
+
+The raw source is a transactional table at \textbf{daily granularity}. Each record represents units posted for a given business segment and accounting period. Since ARIMA-family models assume a \textbf{regularly spaced time index} and behave best when the input is close to \textbf{stationary} after transformation, the project implements a deterministic pipeline that converts raw transactions into clean \textbf{monthly} time series. This logic is implemented in \texttt{01\_data\_transformation.py} and validated in \texttt{00\_data\_exploration.py}.
+
+\subsection{Monthly panel construction}
+
+The first stage converts daily events into a monthly panel per segment. Transactions are aggregated into monthly totals and split into two distinct targets:
+\begin{itemize}
+    \item \textbf{Net Sales} (\texttt{net\_sales}): the monthly sum of all positive unit movements.
+    \item \textbf{Returns} (\texttt{returns}): the monthly sum of the absolute value of negative unit movements, expressed as a positive magnitude.
+\end{itemize}
+This separation is intentional because sales and returns often follow different dynamics and seasonal patterns. Treating them as independent targets improves interpretability and prevents cancellation effects that can hide structure when modeling a single net series.
+
+Finally, the pipeline enforces a complete monthly calendar for each segment. A continuous monthly index is created from the first to the last observed accounting period, and any missing month is filled with zero units. This step is operationally critical: seasonal differencing and SARIMA recursion require that all lagged months exist (notably at lags 12, 24, etc.). Without a complete grid, differencing either fails or implicitly changes the effective time axis.
+
+\subsection{Stationarity-oriented transformations}
+
+After aggregation, each monthly series is transformed to better satisfy ARIMA assumptions.
+
+First, a \textbf{shifted log transform} is applied to stabilize variance in the presence of level-dependent volatility. Because returns and low-volume months can produce non-positive values, a data-dependent shift constant $c$ is used to ensure the log argument is strictly positive:
+\begin{equation}
+y'_t=\log(y_t+c).
+\end{equation}
+The shift is chosen per series so that the smallest observed value becomes at least $1$ prior to applying $\log(\cdot)$, avoiding undefined values while preserving relative differences on the transformed scale.
+
+Second, \textbf{differencing} removes predictable mean structure. ACF inspection supports an annual seasonal span $S=12$ for monthly data, so a seasonal difference is applied:
+\begin{equation}
+z_t = y'_t - y'_{t-12}.
+\end{equation}
+If residual trend remains, a first regular difference is applied to the seasonally adjusted series:
+\begin{equation}
+w_t = z_t - z_{t-1}.
+\end{equation}
+The resulting working series $\{w_t\}$ is the stationary signal used by the SARIMA recursion and estimation routines. Inverse transformations are applied after inference to return forecasts to business units.
+
+\subsection{Diagnostics and parameter selection}
+
+Transformations are validated and the differencing orders are chosen using standard time-series diagnostics:
+\begin{itemize}
+    \item \textbf{ACF/PACF} to confirm the seasonal structure and to verify that differencing removes low-frequency dependence,
+    \item \textbf{ADF and KPSS} tests as complementary stationarity checks, since their null hypotheses point in opposite directions and reduce the risk of over-differencing or under-differencing.
+\end{itemize}
+This stage determines the seasonal span $S$ and the differencing orders $(d,D)$ used later when specifying the SARIMA model.
+
+% -------------------------------------------------------------------
+% SECTION 4: MATHEMATICAL FRAMEWORK
+% -------------------------------------------------------------------
+\section{Mathematical Framework: ARIMA and Multiplicative SARIMA}
+
+This section defines the full stochastic model used in this project. We start from non-seasonal ARIMA and then extend the same construction to the multiplicative seasonal model SARIMA. Throughout, we are modeling a \emph{univariate discrete-time stochastic process}, not a deterministic sequence.
+
+\subsection{Objects and notation}
+
+Let $\{Y_t\}_{t\in\mathbb{Z}}$ be a real-valued stochastic process. Each $Y_t$ is a random variable, and the observed time series $\{y_t\}$ is a single realization of $\{Y_t\}$.
+
+A central tool is the \textbf{backshift operator} $B$, which acts on time-indexed random variables by shifting them backward in time:
+\begin{equation}
+    BY_t = Y_{t-1},\qquad B^kY_t = Y_{t-k}.
+\end{equation}
+The operator acts on the time index, not on coefficients (coefficients are fixed scalars). This matches the standard notational conventions used in time-domain ARIMA modeling. \textit{(See the definition and remarks on $B$ in the course notes [1].)}
+
+\subsection{AR, MA, and ARMA as stochastic difference equations}
+
+We define an \textbf{innovation} (or \textbf{white noise}) sequence $\{w_t\}$ as a sequence of i.i.d.\ random variables with
+\begin{equation}
+    \mathbb{E}[w_t]=0,\qquad \mathrm{Var}(w_t)=\sigma_w^2,
+\end{equation}
+often modeled as Gaussian $w_t \stackrel{\mathrm{iid}}{\sim}\mathcal{N}(0,\sigma_w^2)$ for likelihood-based inference [2].
+
+\paragraph{Autoregressive model AR($p$).}
+An AR($p$) model states that the current value depends linearly on its last $p$ values plus an innovation:
+\begin{equation}
+    X_t = \mu + \phi_1(X_{t-1}-\mu)+\cdots+\phi_p(X_{t-p}-\mu)+w_t,
+\end{equation}
+where $\mu\in\mathbb{R}$ is a constant mean level and $\phi_i\in\mathbb{R}$ are AR coefficients.
+
+Using operator notation, define the \textbf{AR polynomial}
+\begin{equation}
+    \phi_p(B)=1-\phi_1B-\cdots-\phi_pB^p.
+\end{equation}
+Then the AR($p$) model can be written compactly as
+\begin{equation}
+    \phi_p(B)(X_t-\mu)=w_t.
+\end{equation}
+This polynomial form is the standard entry point for ARIMA notation [1].
+
+\paragraph{Moving-average model MA($q$).}
+An MA($q$) model states that the current value is a linear combination of the current and past $q$ innovations:
+\begin{equation}
+    X_t=\mu+w_t+\theta_1w_{t-1}+\cdots+\theta_qw_{t-q},
+\end{equation}
+with MA coefficients $\theta_k\in\mathbb{R}$.
+
+Define the \textbf{MA polynomial}
+\begin{equation}
+    \theta_q(B)=1+\theta_1B+\cdots+\theta_qB^q,
+\end{equation}
+so that
+\begin{equation}
+    X_t-\mu=\theta_q(B)w_t.
+\end{equation}
+Many references and software packages use a sign-flipped MA convention; the model class is the same, but coefficient signs change accordingly, so the chosen convention must be stated explicitly [2].
+
+\paragraph{ARMA($p,q$).}
+Combining both mechanisms yields ARMA($p,q$):
+\begin{equation}
+    \phi_p(B)(X_t-\mu)=\theta_q(B)w_t.
+\end{equation}
+Invertibility restrictions are typically enforced by software when estimating MA terms, because they ensure a stable and identifiable representation [2].
+
+\subsection{Differencing and ARIMA($p,d,q$)}
+
+ARMA assumes (weak) stationarity in the mean. When the observed process $\{Y_t\}$ is nonstationary due to trend, we apply differencing.
+
+Define the \textbf{non-seasonal difference operator} $\nabla$ by
+\begin{equation}
+    \nabla = 1-B,\qquad \nabla Y_t = (1-B)Y_t=Y_t-Y_{t-1}.
+\end{equation}
+Higher-order differencing is repeated application, $\nabla^d=(1-B)^d$ [3].
+
+Let the differenced process be
+\begin{equation}
+    X_t = \nabla^d Y_t.
+\end{equation}
+Then an ARIMA($p,d,q$) model is defined as an ARMA($p,q$) model for the differenced series $\{X_t\}$:
+\begin{equation}
+    \phi_p(B)(X_t-\mu)=\theta_q(B)w_t
+    \qquad\text{with}\qquad X_t=\nabla^dY_t.
+\end{equation}
+
+\subsection{Seasonality and SARIMA($p,d,q)\times(P,D,Q)_S$}
+
+Now assume the data have a seasonal span $S$ (for example, $S=12$ for monthly data with yearly seasonality). Seasonal nonstationarity is handled via \textbf{seasonal differencing}:
+\begin{equation}
+    \nabla_S = 1-B^S,\qquad \nabla_S Y_t = (1-B^S)Y_t = Y_t - Y_{t-S}.
+\end{equation}
+When both trend and seasonality are present, both operators may be applied:
+\begin{equation}
+    X_t = \nabla^d \nabla_S^D Y_t.
+\end{equation}
+The course notes emphasize this combined differencing as the standard preparation step before fitting seasonal AR and MA terms [4].
+
+\paragraph{Seasonal and non-seasonal polynomials.}
+Define the seasonal AR and MA polynomials as functions of $B^S$:
+\begin{equation}
+    \Phi_P(B^S)=1-\Phi_1B^S-\cdots-\Phi_PB^{PS},\qquad
+    \Theta_Q(B^S)=1+\Theta_1B^S+\cdots+\Theta_QB^{QS}.
+\end{equation}
+
+\paragraph{Multiplicative SARIMA.}
+A multiplicative seasonal ARIMA model applies both the non-seasonal and seasonal polynomials, multiplying them on the AR side and on the MA side:
+\begin{equation}\label{eq:sarima_multiplicative}
+    \Phi_P(B^S)\,\phi_p(B)\,(X_t-\mu)=\Theta_Q(B^S)\,\theta_q(B)\,w_t,
+    \qquad X_t=\nabla^d\nabla_S^D Y_t.
+\end{equation}
+This multiplicative structure is the defining feature of SARIMA notation [4].
+
+\subsection{Why multiplication creates interaction lags}
+
+Because the seasonal and non-seasonal polynomials multiply, expanding them produces \textbf{interaction lags} of the form $i+jS$.
+
+For example, the AR-side expansion of a $(1,0,0)\times(1,0,0)_{12}$ structure is
+\begin{equation}
+    (1-\phi_1B)(1-\Phi_1B^{12})
+    =1-\phi_1B-\Phi_1B^{12}+\phi_1\Phi_1B^{13}.
+\end{equation}
+The appearance of $B^{13}$ shows that the multiplicative model induces dependence at lag $13$ even though neither component individually included lag $13$. The seasonal notes explicitly highlight that seasonal and non-seasonal components multiply, which is exactly what generates these cross-lag terms [4].
+
+A symmetric phenomenon occurs on the MA side. For a $(0,0,1)\times(0,0,1)_{12}$ model,
+multiplication yields MA terms at lags $1$, $12$, and $13$, and the notes use this as a canonical example [4].
+
+\subsection{Parameter estimation as regularized least squares with SGD}
+
+Let $\boldsymbol{\Omega}\in\mathbb{R}^K$ denote the parameter vector that contains all coefficients being optimized (non-seasonal, seasonal, and any explicitly implemented interaction-lag coefficients).
+
+At each time $t$, define a feature vector $\mathbf{x}_t\in\mathbb{R}^K$ that collects the relevant lagged predictors implied by the expanded SARIMA recursion (lagged $X_{t-i}$ terms and lagged innovations or residual proxies). The one-step-ahead conditional predictor is written as a linear form
+\begin{equation}
+    \widehat{X}_t = \mu + \boldsymbol{\Omega}^\top \mathbf{x}_t,
+\end{equation}
+and the one-step-ahead error (innovation proxy) is
+\begin{equation}
+    e_t(\boldsymbol{\Omega}) = X_t - \widehat{X}_t.
+\end{equation}
+
+We estimate $\boldsymbol{\Omega}$ by minimizing a regularized sum of squared one-step errors:
+\begin{equation}
+    J(\boldsymbol{\Omega}) = \frac{1}{2}\sum_{t=1}^{T} e_t(\boldsymbol{\Omega})^2
+    +\frac{\lambda}{2}\lVert\boldsymbol{\Omega}\rVert_2^2,
+\end{equation}
+where $\lambda\ge 0$ is the L2 regularization strength.
+
+A stochastic-gradient step (using one time index $t_k$ at iteration $k$) takes the form
+\begin{equation}
+    \boldsymbol{\Omega}^{(k+1)}
+    = \boldsymbol{\Omega}^{(k)} - \eta\left(\nabla_{\boldsymbol{\Omega}} \frac{1}{2}e_{t_k}^2 + \lambda \boldsymbol{\Omega}^{(k)}\right)
+    = (1-\eta\lambda)\boldsymbol{\Omega}^{(k)} + \eta\,e_{t_k}\,\mathbf{x}_{t_k},
+\end{equation}
+with learning rate $\eta>0$.
+
+Regularization shrinks coefficients toward zero, which helps control numerical instability in long recursive forecasting, especially when MA-style recursion uses estimated past errors that can amplify sensitivity to parameter changes.
+
+% -------------------------------------------------------------------
+% SECTION 5: MODEL SELECTION & MLOPS
+% -------------------------------------------------------------------
+\section{Model Selection and MLOPS Architecture}
+
+\subsection{Hyperparameter Tuning Strategy: Grid Search}
+Selecting the correct model order $(p,d,q) \times (P,D,Q)$ is non-trivial. While ACF/PACF plots provide a heuristic starting point, they are often ambiguous for complex seasonal data. To address this, we implemented a \textbf{Grid Search} from scratch.
+
+This search algorithm iterates through a manually specified subset of the hyperparameter space, building a "grid" of all possible combinations of parameters and training a distinct model for each point on the grid.
+
+In our implementation, we fixed the differencing parameters ($d=1, D=1$) based on stationarity tests and defined the search space for the remaining terms:
+\begin{itemize}
+    \item Non-seasonal AR ($p$) and MA ($q$): Ranges $\{0, 1\}$ and $\{0, 1, 2\}$
+    \item Seasonal AR ($P$) and MA ($Q$): Ranges $\{0, 1\}$
+\end{itemize}
+
+For each combination, the model is evaluated using \textbf{Rolling-Origin Cross-Validation}. This technique respects the temporal order of data, training on $t_{0} \dots t_{k}$ and predicting $t_{k+1} \dots t_{k+h}$, then sliding the window forward. The configuration with the lowest average RMSE across all folds is selected for the final production model.
+
+\subsection{Deployment (Flask REST API)}
+The trained forecasting models are exposed through a RESTful inference service implemented with \textbf{Flask}. Conceptually, the API has two responsibilities: (i) \textit{model management} (discover, select, and load MLflow artifacts into memory), and (ii) \textit{forecast generation} (serve predictions as a time-indexed vector for downstream consumers).
+
+\subsubsection{Objects and service state}
+The API manipulates the following objects:
+\begin{itemize}
+    \item \textbf{Segments (categorical identifiers).} A segment selects a business partition (e.g., Dealer, OEM, Professional End-Users). Segments are treated as \emph{strings} and are validated against a fixed allow-list.
+    \item \textbf{Targets (categorical identifiers).} A target selects which time series is being forecast (e.g., \texttt{net\_sales}, \texttt{returns}). Targets are treated as \emph{strings} and are validated against a fixed allow-list.
+    \item \textbf{MLflow runs (model artifacts).} A run is identified by a \texttt{run\_id}. Each run stores parameters (e.g., SARIMA orders), metrics (e.g., RMSE), and a serialized model artifact.
+    \item \textbf{Loaded model registry (in-memory mapping).} The server maintains a dictionary keyed by \texttt{model\_key := segment\_target}. Each entry contains: the loaded model object, the \texttt{run\_id}, and a \texttt{loaded\_at} timestamp. This is the state that inference endpoints depend on.
+\end{itemize}
+
+\subsubsection{Cross-cutting concerns}
+\paragraph{JSON contract.}
+All inference and model-management interactions use JSON request bodies and JSON responses. Requests that omit a body, omit required fields, or fail validation return \texttt{HTTP 400}.
+
+\paragraph{Rate limiting (per-client, in-memory).}
+To prevent resource exhaustion, requests are throttled per client IP. The server tracks recent request timestamps in a sliding time window, and rejects excess requests with \texttt{HTTP 429} plus a \texttt{Retry-After} header (in seconds). Because this limiter is in-memory, it resets on server restart and does not coordinate across multiple replicas.
+
+\subsubsection{Endpoint catalog and detailed contracts}
+
+\paragraph{\texttt{GET /health} (liveness and service metadata).}
+This endpoint answers whether the server is running and reports how many models are currently loaded into memory.
+\begin{verbatim}
+GET /health
+\end{verbatim}
+
+\textbf{Response (200)}:
+\begin{verbatim}
+{
+  "status": "healthy",
+  "timestamp": "YYYY-MM-DDTHH:MM:SS.ssssss",
+  "loaded_models_count": <integer>
+}
+\end{verbatim}
+
+\paragraph{\texttt{GET /models} (discover available MLflow runs).}
+This endpoint queries MLflow for finished runs, extracts run parameters and metrics, and returns them as a list. Optional query parameters allow filtering by segment and/or target.
+\begin{verbatim}
+GET /models
+GET /models?segment=DEALER
+GET /models?target=returns
+GET /models?segment=DEALER&target=returns
+\end{verbatim}
+
+\textbf{Response (200)}:
+\begin{verbatim}
+{
+  "total_count": <integer>,
+  "filters_applied": { "segment": "<string-or-null>", "target": "<string-or-null>" },
+  "models": [
+    {
+      "run_id": "<string>",
+      "run_name": "<string>",
+      "start_time": "YYYY-MM-DDTHH:MM:SS",
+      "segment": "<string>",
+      "target": "<string>",
+      "sarima_order": "(p,d,q)(P,D,Q)[s]",
+      "metrics": {
+        "sarima_RMSE": <number-or-null>,
+        "sarima_MAPE": <number-or-null>,
+        "beats_baseline": <number-or-null>
+      }
+    }
+  ]
+}
+\end{verbatim}
+
+\paragraph{\texttt{GET /models/loaded} (inspect in-memory loaded models).}
+This endpoint returns the server-side registry of loaded models, keyed by \texttt{model\_key := segment\_target}.
+\begin{verbatim}
+GET /models/loaded
+\end{verbatim}
+
+\textbf{Response (200)}:
+\begin{verbatim}
+{
+  "loaded_models": {
+    "DEALER_net_sales": {
+      "run_id": "<string>",
+      "segment": "DEALER",
+      "target": "net_sales",
+      "loaded_at": "YYYY-MM-DDTHH:MM:SS.ssssss"
+    }
+  },
+  "count": <integer>
+}
+\end{verbatim}
+
+\paragraph{\texttt{POST /models/load} (load a specific run for inference).}
+This endpoint materializes a model artifact from MLflow into server memory. After loading, inference can be requested for the corresponding \texttt{segment} and \texttt{target}.
+\begin{verbatim}
+POST /models/load
+Content-Type: application/json
+\end{verbatim}
+
+\textbf{Request body}:
+\begin{verbatim}
+{
+  "run_id": "<string>",
+  "segment": "<string>",
+  "target": "<string>"
+}
+\end{verbatim}
+
+\textbf{Responses}:
+\begin{itemize}
+    \item \textbf{200} on success:
+\begin{verbatim}
+{ "success": true, "message": "<string>", "model_key": "SEGMENT_TARGET" }
+\end{verbatim}
+    \item \textbf{400} if any field is missing or invalid.
+    \item \textbf{500} if MLflow loading fails (artifact missing, incompatible environment, corrupted run, etc.).
+\end{itemize}
+
+\paragraph{\texttt{POST /models/auto-load} (bulk load ``best'' runs for all segment-target pairs).}
+This endpoint loads one model per admissible \texttt{(segment, target)} pair. In this implementation, ``best'' is operationally defined as the \emph{first} matching run returned by the server’s MLflow search ordering; therefore, the selection criterion is only as strong as the ordering rule used when fetching runs.
+\begin{verbatim}
+POST /models/auto-load
+\end{verbatim}
+
+\textbf{Response (200)}:
+\begin{verbatim}
+{
+  "success": true,
+  "message": "Auto-loaded <integer> models",
+  "loaded_models": { ...same structure as GET /models/loaded... }
+}
+\end{verbatim}
+
+\paragraph{\texttt{POST /predict} (single-series forecast).}
+This is the primary inference endpoint. It returns a monthly forecast vector for a specific \texttt{segment} and \texttt{target}. Forecast length is \texttt{num\_periods} and is constrained to a bounded horizon. The server constructs a monthly date index and pairs each predicted value with \texttt{YYYY-MM} identifiers.
+
+\begin{verbatim}
+POST /predict
+Content-Type: application/json
+\end{verbatim}
+
+\textbf{Request body}:
+\begin{verbatim}
+{
+  "segment": "<string>",
+  "target": "<string>",
+  "num_periods": <integer, default 12>,
+  "start_date": "YYYY-MM-DD"   (optional)
+}
+\end{verbatim}
+
+\textbf{Semantics and validation}:
+\begin{itemize}
+    \item \texttt{segment} and \texttt{target} are required and must belong to the allow-lists.
+    \item \texttt{num\_periods} must be an integer in a fixed interval (bounded to avoid unbounded recursion and latency).
+    \item If \texttt{start\_date} is omitted (or fails to parse), the server anchors the forecast at the first day of the next calendar month.
+    \item Predictions are returned as non-negative integers (post-processed via rounding and clipping).
+\end{itemize}
+
+\textbf{Response (200)}:
+\begin{verbatim}
+{
+  "segment": "<string>",
+  "target": "<string>",
+  "num_periods": <integer>,
+  "forecast_start": "YYYY-MM-DD",
+  "forecast_end": "YYYY-MM-DD",
+  "forecasts": [
+    { "period": 1, "date": "YYYY-MM-DD", "month": "YYYY-MM", "forecast_value": <integer> }
+  ],
+  "model_info": { "run_id": "<string-or-null>", "loaded_at": "<string-or-null>" }
+}
+\end{verbatim}
+
+\paragraph{\texttt{POST /predict/batch} (multi-series forecast with server-side netting).}
+This endpoint produces forecasts for all targets for a given segment in a single call and performs server-side business logic when both \texttt{net\_sales} and \texttt{returns} are available. Specifically, it computes:
+\[
+\texttt{total\_net\_forecast}_t := \max\{\texttt{net\_sales\_forecast}_t - \texttt{returns\_forecast}_t,\, 0\}.
+\]
+This shifts arithmetic and consistency rules to the server, so clients only consume one canonical vector.
+
+\begin{verbatim}
+POST /predict/batch
+Content-Type: application/json
+\end{verbatim}
+
+\textbf{Request body}:
+\begin{verbatim}
+{
+  "segment": "<string>",
+  "num_periods": <integer, default 12>,
+  "start_date": "YYYY-MM-DD"   (optional)
+}
+\end{verbatim}
+
+\textbf{Response (200)}:
+\begin{verbatim}
+{
+  "segment": "<string>",
+  "num_periods": <integer>,
+  "forecast_start": "YYYY-MM-DD",
+  "forecast_end": "YYYY-MM-DD",
+  "forecasts": [
+    {
+      "period": 1,
+      "date": "YYYY-MM-DD",
+      "month": "YYYY-MM",
+      "net_sales_forecast": <integer>,
+      "returns_forecast": <integer>,
+      "total_net_forecast": <integer>
+    }
+  ],
+  "errors": { "net_sales": "<string>", "returns": "<string>" }  (null if none)
+}
+\end{verbatim}
+
+\textbf{Error behavior}:
+If no target forecast can be produced (e.g., no models are loaded for the requested segment), the endpoint returns \texttt{HTTP 400} and includes per-target error details.
+
+\subsubsection{Operational configuration}
+The server reads environment variables to control runtime behavior:
+\begin{itemize}
+    \item \texttt{AUTO\_LOAD\_MODELS}: whether to auto-load one run per segment-target pair on startup.
+    \item \texttt{API\_HOST}, \texttt{API\_PORT}, \texttt{API\_DEBUG}: host binding, port, and debug mode.
+\end{itemize}
+This design enables the same codebase to run locally, on a LAN, or behind a reverse proxy, without modifying the implementation.
+
+% -------------------------------------------------------------------
+% SECTION 6: RESULTS
+% -------------------------------------------------------------------
+\section{Results and Interpretation}
+
+\subsection{Forecast Visualization}
+The model demonstrates a strong ability to capture the seasonality inherent in the automotive sector. Figure \ref{fig:overview} illustrates the 12-month forecast horizon across all three segments.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{code/artifacts/sarima_forecast_visualization.png}
+    \caption{Global 12-Month Forecast for Net Sales across Segments. Note the capture of the end-of-year dip and Q2 recovery.}
+    \label{fig:overview}
+\end{figure}
+
+\subsection{Performance Metrics}
+Table \ref{tab:metrics} summarizes the performance on the hold-out test set for all customer segments and targets. The Custom SARIMA model outperforms or remains competitive with the Seasonal Naive baseline across the board. Notably, the \textit{Dealer} segment, which carries the highest volume and volatility, shows significant improvement in RMSE.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{llccc}
+\toprule
+\textbf{Segment} & \textbf{Target} & \textbf{SARIMA RMSE} & \textbf{Baseline RMSE} & \textbf{Outcome} \\
+\midrule
+Dealer & Net Sales & 3672.19 & 3685.09 & \textbf{Better} \\
+Dealer & Returns & 2470.63 & 2699.63 & \textbf{Better} \\
+OEM & Net Sales & 291.86 & 143.26 & Baseline Better \\
+OEM & Returns & 96.91 & 104.72 & \textbf{Better} \\
+Professional Users & Net Sales & 430.48 & 449.39 & \textbf{Better} \\
+Professional Users & Returns & 96.62 & 101.76 & \textbf{Better} \\
+\bottomrule
+\end{tabular}
+\caption{Comparative Accuracy Metrics (Test Set). The SARIMA model outperforms the baseline in 5 out of 6 targets.}
+\label{tab:metrics}
+\end{table}
+
+% -------------------------------------------------------------------
+% SECTION 7: CONCLUSION
+% -------------------------------------------------------------------
+\section{Conclusion}
+
+This project delivered a robust forecasting platform for the automotive industry by implementing a Multiplicative SARIMA algorithm from scratch using Gradient Descent optimization. Model selection through Grid Search and Rolling-Origin Cross-Validation ensured that the chosen hyperparameters remain robust against temporal shifts. Integration with MLflow for experiment tracking and Flask for API deployment transforms this solution from an academic exercise into a production-ready asset. The ability to forecast Net Sales and Returns independently enables inventory optimization and more accurate fiscal margin projections.
+
+Future iterations could extend this work in several directions. Incorporating exogenous variables through a SARIMAX formulation would allow the model to capture external demand drivers such as macroeconomic indicators or promotional events. Ensemble approaches combining SARIMA with machine learning models could further reduce forecast variance. Replacing Grid Search with Bayesian optimization would improve hyperparameter tuning efficiency. Finally, implementing prediction intervals and automated retraining pipelines would enhance both forecast interpretability and long-term model maintenance.
+
+\newpage
+
+% -------------------------------------------------------------------
+% SECTION 8: REFERENCES
+% -------------------------------------------------------------------
+\begin{thebibliography}{9}
+
+\bibitem{lesson1}
+Penn State University. (n.d.). 
+\textit{Lesson 1: Time Series Basics}. 
+STAT 510: Applied Time Series Analysis.
+
+\bibitem{lesson2}
+Penn State University. (n.d.). 
+\textit{Lesson 2: MA Models, Partial Autocorrelation, Notational Conventions}. 
+STAT 510: Applied Time Series Analysis.
+
+\bibitem{lesson3}
+Penn State University. (n.d.). 
+\textit{Lesson 3: Identifying and Estimating ARIMA models; Using ARIMA models to forecast future values}. 
+STAT 510: Applied Time Series Analysis.
+
+\bibitem{lesson4}
+Penn State University. (n.d.). 
+\textit{Lesson 4: Seasonal Models}. 
+STAT 510: Applied Time Series Analysis.
+
+\bibitem{lesson5}
+Penn State University. (n.d.). 
+\textit{Lesson 5: Smoothing and Decomposition Methods and More Practice with ARIMA Models}. 
+STAT 510: Applied Time Series Analysis.
+
+\end{thebibliography}
+
+\end{document}
